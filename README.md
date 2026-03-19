@@ -184,7 +184,11 @@ Total install time is about 20 minutes if you have Node.js already. The prompt b
 
 None of these tools know about each other. They work at different layers and don't conflict. Context-Manager handles the compaction boundary. CMV manages context size. Claude-Mem bridges sessions. The prompt booster shapes output quality. They stack cleanly because they solve different problems.
 
+I've put everything in one place: both ClaudeDSP scripts, the install guide, the prompt booster, and a detailed comparison of all the tools I evaluated. It's all at [github.com/VolanticSystems/claudedsp-stack](https://github.com/VolanticSystems/claudedsp-stack). Fork it, use it, improve it.
+
 ## Links
+
+- [All of the above in one repo](https://github.com/VolanticSystems/claudedsp-stack)
 
 - [Context-Manager](https://github.com/DxTa/claude-dynamic-context-pruning)
 
