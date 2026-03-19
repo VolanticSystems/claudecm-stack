@@ -50,7 +50,7 @@ That solved the "which session was I in" problem. But it didn't solve the "Claud
 
 ## The Context Stack
 
-After doing some research, including a review of recent Anthropic updates, I still saw value in three tools, layered on top of each other, which did not conflict or cause other problems. Each one handles a different failure mode.
+After doing some research, including a review of recent Anthropic updates, I still saw value in three tools, layered on top of each other. They don't conflict because they operate at different layers: Context-Manager hooks into compaction events, CMV manages the context window size, and Claude-Mem runs a separate background worker. Different hook events, different storage, no interference. Each one handles a different failure mode.
 
 ### Layer 1: Context-Manager, Compaction Insurance
 
@@ -77,6 +77,8 @@ Layer 3 is by Alex Newman. (thedotmack) The first two layers handle within-sessi
 It runs alongside every session, watching what Claude does. Every file edit, every decision, every tool call gets captured. A background worker compresses these observations using Claude's own agent SDK --- not raw transcript dumps, but AI-generated semantic summaries that capture what matters and discard what doesn't.
 
 When you start a new session or resume an old one, Claude-Mem injects relevant compressed memories from previous sessions. You come back to a project after a week and Claude already knows the architecture, the conventions, the decisions you made last time, the bugs you hit.
+
+Claude Code already has built-in auto-memory via MEMORY.md for basic cross-session persistence. Claude-Mem adds a deeper layer on top: AI-compressed observations of actual tool usage, file modifications, and error patterns, not just the notes the model chose to save on its own.
 
 ## What This Actually Looks Like
 
