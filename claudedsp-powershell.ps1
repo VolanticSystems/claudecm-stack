@@ -70,6 +70,10 @@ function claudedsp {
                     Write-Host "  Current: $($sessions[$idx].Dir)"
                     $newPath = Read-Host "  New path (Enter to keep)"
                     if ($newPath) {
+                        if (-not (Test-Path $newPath)) {
+                            Write-Host "  Path does not exist: $newPath"
+                            continue
+                        }
                         $guid = $sessions[$idx].Guid
                         $oldKey = $sessions[$idx].Dir -replace ':', '-' -replace '\\', '-'
                         $newKey = $newPath -replace ':', '-' -replace '\\', '-'
@@ -132,19 +136,21 @@ function claudedsp {
     }
 
     function Do-PostExit($knownGuid) {
-        # Auto-snapshot with CMV on exit
+        # Auto-snapshot with CMV on exit (suppress output; "active session" warning
+        # is a false positive when other Claude sessions are running)
         $cmvExe = "$env:APPDATA\npm\cmv.cmd"
         if (Test-Path $cmvExe) {
             $snapLabel = "auto-exit-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            & $cmvExe snapshot $snapLabel --latest 2>$null
+            & $cmvExe snapshot $snapLabel --latest *>$null
         }
         if ($knownGuid) {
             $guid = $knownGuid
         } else {
-            $projKey = (Get-Location).Path -replace ':', '-' -replace '\\', '-'
-            $projDir = "$env:USERPROFILE\.claude\projects\$projKey"
-            if (-not (Test-Path $projDir)) { return }
-            $newest = Get-ChildItem "$projDir\*.jsonl" -ErrorAction SilentlyContinue |
+            # Find the most recently modified non-agent .jsonl across ALL project dirs
+            $claudeProjects = "$env:USERPROFILE\.claude\projects"
+            if (-not (Test-Path $claudeProjects)) { return }
+            $newest = Get-ChildItem "$claudeProjects\*\*.jsonl" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notlike 'agent-*' } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
             if (-not $newest) { return }
             $guid = $newest.BaseName
