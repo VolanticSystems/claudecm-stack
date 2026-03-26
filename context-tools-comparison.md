@@ -298,6 +298,6 @@ This three-layer stack covers: within-session survival (Context-Manager), struct
 - [Volt/LCM](https://github.com/voltropy/volt)
 - [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw)
 - [CMV - Contextual Memory Virtualisation](https://github.com/CosmoNaught/claude-code-cmv)
-- [CMV arXiv Paper](https://arxiv.org/html/2602.22402)
+- [CMV arXiv Paper](https://arxiv.org/abs/2602.22402)
 - [Claude Code Feature Request #27293](https://github.com/anthropics/claude-code/issues/27293)
 - [LCM Paper Discussion (Hacker News)](https://news.ycombinator.com/item?id=47074246)

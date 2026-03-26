@@ -18,18 +18,19 @@ In the zoom-away project, a cron monitoring job resuming a large Opus conversati
 
 ## Solutions
 
-### 1. Session Trimming at Exit (add to claudedsp-linux.sh)
+### 1. Session Trimming at Exit (IMPLEMENTED in claudedsp)
 
-After Claude exits and the notes prompt completes, add a trim prompt:
+When you exit a session, ClaudeDSP prompts:
 
 ```
-Would you like to trim this session? (y/N):
+Trim this session? [y/N]:
 ```
 
-If yes:
-- Run `cmv trim --latest --skip-launch`
-- Capture the new (trimmed) session GUID from the output line `Session ID: <guid>`
-- Replace the old GUID with the new one in `sessions.txt`
+If yes, it:
+- Runs `cmv trim --latest --skip-launch`
+- Captures the new (trimmed) session GUID from the output
+- Replaces the old GUID with the new one in `sessions.txt`
+- Renames any associated notes file
 - The snapshot preserves the full history (recoverable via `cmv list`)
 - Next resume loads the trimmed version automatically
 
@@ -102,31 +103,27 @@ Desired instrumentation:
 
 This would require either Claude Code exposing token metrics, or building an approximation by measuring the JSONL transcript file size and estimating tokens (roughly 4 chars per token).
 
-## Feature Request: "New Session" Option in claudedsp
+### 6. Session Refresh (IMPLEMENTED in claudedsp)
 
-Currently, after Claude exits, claudedsp only offers to rename the session. It should also offer the option to start a new session in the same project directory, for cases where a conversation has become bloated and the user wants a fresh start while keeping all project files, memories, and documentation intact.
+After the trim prompt, ClaudeDSP also offers:
 
-Proposed flow after Claude exits:
 ```
-Session saved.
-  (r) Rename this session
-  (n) Start a new session in the same directory (fresh context, same project)
-  (Enter) Done
+Replace current session with a fresh one? (deeper clean) [y/N]:
 ```
 
-If the user picks (n):
-- The current session stays in sessions.txt (accessible for reference)
-- A new Claude session is launched in the same working directory
-- The new session gets a new GUID and clean context
-- After the new session exits, it's saved to sessions.txt as a new entry
-- The user can provide a name like "Zoom Away v2"
+If yes, it:
+- Asks for a name for the new session (defaults to the current name)
+- Optionally lets you edit the refresh prompt (what the new session reads on startup)
+- Launches a headless Claude session that reads memory files, project docs, and codebase
+- Adds the new session to the top of the list
+- Marks the old session "(old)" and moves it to the bottom (still accessible for reference)
 
-This complements the trim feature: trim reduces an existing session's bloat, while "new session" starts completely fresh when the bloat is beyond trimming.
+This complements trim: trim reduces an existing session's bloat, while refresh starts completely fresh when the bloat is beyond trimming. Use trim after regular work sessions. Use refresh at milestones when the conversation has accumulated enough history that trim alone isn't enough.
 
-## Implementation Priority
+## Implementation Status
 
-1. **Add trim prompt to claudedsp exit flow** (immediate, biggest impact)
-2. **Rewrite cron jobs to use fresh Haiku invocations** (immediate, stops the bleed)
-3. **Fresh session for zoom-away** (immediate, this session is bloated beyond recovery)
+1. ~~Add trim prompt to claudedsp exit flow~~ DONE
+2. ~~Add refresh/new session to claudedsp exit flow~~ DONE
+3. **Rewrite cron jobs to use fresh Haiku invocations** (stops the bleed)
 4. **Add token estimation from transcript file size** (nice to have, helps make informed decisions)
-5. **Plugin hygiene review across all 22 sessions** (periodic, low priority)
+5. **Plugin hygiene review across all sessions** (periodic, low priority)
