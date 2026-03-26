@@ -241,6 +241,13 @@ function claudedsp {
     }
 
     function Do-PostExit($knownGuid) {
+        # Let Claude Code finish its terminal cleanup before we prompt
+        Start-Sleep -Milliseconds 300
+        Write-Host ""
+        Write-Host ""
+        Write-Host ""
+        Write-Host "  Session ended."
+        Write-Host ""
         # Auto-snapshot with CMV on exit (suppress output; "active session" warning
         # is a false positive when other Claude sessions are running)
         $cmvExe = "$env:APPDATA\npm\cmv.cmd"
