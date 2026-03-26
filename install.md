@@ -4,9 +4,25 @@ Everything here runs locally. No API keys needed beyond your existing Claude Cod
 
 ## Prerequisites
 
+All of these must be installed before you start:
+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and working
-- [Node.js](https://nodejs.org) 18 or later
+- [Node.js](https://nodejs.org) 18 or later (check with `node --version`)
+- [Bun](https://bun.sh) (required by Claude-Mem's worker for its built-in SQLite engine)
+  - Windows: `powershell -Command "irm bun.sh/install.ps1 | iex"`
+  - Linux/macOS: `curl -fsSL https://bun.sh/install | bash`
+  - Verify: `bun --version`
+- [jq](https://github.com/jqlang/jq/releases) (required by Context-Manager hooks)
+  - Windows: download the binary from the releases page and put it on your PATH
+  - Linux: `sudo apt install jq` (or your package manager)
+  - Verify: `jq --version`
 - Git
+
+### A note on Bun
+
+Bun is a JavaScript runtime (like Node.js) that Claude-Mem uses for one reason: its built-in SQLite engine (`bun:sqlite`). Only the Claude-Mem background worker requires Bun; the MCP server and hooks run under Node.js.
+
+**Security:** The worker listens on `127.0.0.1:37777` (localhost only) by default. External connections are impossible at the OS level. No firewall changes are needed. Do not change `CLAUDE_MEM_WORKER_HOST` to `0.0.0.0` unless you have a specific reason and understand the implications.
 
 ## Step 1: ClaudeDSP (Session Manager)
 
@@ -48,11 +64,7 @@ Everything here runs locally. No API keys needed beyond your existing Claude Cod
 # Clone
 git clone https://github.com/DxTa/claude-dynamic-context-pruning.git ~/.claude-plugins/context-manager
 
-# Install jq if you don't have it
-# Windows: download from https://github.com/jqlang/jq/releases to a folder on your PATH
-# Linux: sudo apt install jq (or your package manager)
-
-# Build
+# Build (requires jq, installed in Prerequisites above)
 cd ~/.claude-plugins/context-manager && ./setup.sh
 
 # Register the MCP server globally
@@ -129,11 +141,10 @@ claude mcp add claude-mem --transport stdio -s user -- \
   node ~/.claude-plugins/claude-mem/plugin/scripts/mcp-server.cjs
 ```
 
-Claude-Mem requires Bun for its background worker. If you don't have it:
-- Windows: `powershell -Command "irm bun.sh/install.ps1 | iex"`
-- Linux: `curl -fsSL https://bun.sh/install | bash`
-
-The smart-install hook will also auto-install Bun on first session start if it's missing.
+Claude-Mem's background worker requires Bun (installed in Prerequisites above). Verify it's available before proceeding:
+```bash
+bun --version
+```
 
 ## Step 5: Prompt Booster
 
@@ -149,9 +160,14 @@ Create the file if it doesn't exist. This loads once per session and applies to 
 
 Restart Claude Code, then:
 
-1. Run `/mcp` and confirm both `context-manager` and `claude-mem` appear and show connected.
+1. Run `/mcp` and confirm both `context-manager` and `claude-mem` appear and show connected. (CMV is a CLI tool, not an MCP server; it won't appear in this list.)
 2. Run `cmv hook status` in a terminal to confirm CMV hooks are installed.
-3. Start a session and work normally. The tools run automatically in the background.
+3. Run `cmv --version` to confirm it's accessible.
+4. Start a session with `claudedsp` and work normally. The tools run automatically in the background.
+5. When you exit the session, ClaudeDSP will prompt you to:
+   - Add/edit notes for next time
+   - **Trim** the session (strips tool output bloat, keeps your conversation)
+   - **Refresh** the session (starts completely fresh, old session preserved and accessible)
 
 ## What to Expect
 

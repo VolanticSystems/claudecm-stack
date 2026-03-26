@@ -510,6 +510,7 @@ if [[ "${1,,}" == "l" || "$1" == "-l" || "$1" == "-L" ]]; then
             echo "$SESSION_GUID|$proj_dir|$pick" > "$SESSIONS_FILE.tmp"
             cat "$SESSIONS_FILE" >> "$SESSIONS_FILE.tmp"
             mv "$SESSIONS_FILE.tmp" "$SESSIONS_FILE"
+            post_exit "$SESSION_GUID"
         fi
         exit 0
     done
@@ -606,13 +607,7 @@ if [[ -n "$PRE_NAMED" ]]; then
         echo "$SESSION_GUID|$CUR_DIR|$PRE_NAMED" > "$SESSIONS_FILE.tmp"
         cat "$SESSIONS_FILE" >> "$SESSIONS_FILE.tmp"
         mv "$SESSIONS_FILE.tmp" "$SESSIONS_FILE"
-    fi
-    echo ""
-    read -rp "  Add/edit notes? [y/N]: " edit_notes
-    if [[ "${edit_notes,,}" == "y" ]]; then
-        note_path="$NOTES_DIR/$SESSION_GUID.txt"
-        [[ -f "$note_path" ]] || touch "$note_path"
-        $EDITOR "$note_path"
+        post_exit "$SESSION_GUID"
     fi
 else
     post_exit
