@@ -6,7 +6,7 @@
 
 If you use Claude Code for varied tasks, as a lot of people do, you can quickly find yourself juggling multiple projects, with no easy way to keep track of them all. I work across data engineering, UX design, Linux sysadmin, browser automation, debugger tooling, deployment pipelines, and video processing.
 
-At any given time I've got around 20 sessions at various phases of planning and development. I like to pick one up, work for a few hours or more until a milestone is reached, then park it and come back at some point, perhaps the same or next day, or maybe a lot longer than that.
+At any given time I\'ve got around 20 sessions at various phases of planning and development. I like to pick one up, work for a few hours or more until a milestone is reached, then park it and come back at some point, perhaps the same or next day, or maybe a lot longer than that.
 
 Claude Code has two problems with this workflow. The first one hits you immediately. When you exit a session, you get this:
 
@@ -110,6 +110,24 @@ After the stack, compaction still happens, but the recovery is measured in secon
 
 Is it quantifiable? Loosely. I'd estimate I'm saving 30-60 minutes per day that used to go to re-establishing context. On a busy day with multiple sessions, more than that.
 
+## Too Much of a Good Thing
+
+At first I noticed the three-layer stack worked amazingly well. But then I started seeing my Claude usage creeping up more and more. I recently upgraded my subscription, and this was the first time I ran out at the new level. Obviously there was a downside, and I needed a relief valve to cut my token usage. I ended up implementing two of them, actually; one easy to use with minimal impact, and one that can cut usage way down, sometimes by orders of magnitude, but is best saved for milestones.
+
+The three-layer stack protects you from losing context during compaction. It does not protect you from accumulating context you no longer need. Debugging output, file dumps from three days ago, sample code you read once and never referenced again. All of it rides along on every interaction.
+
+**Trim** was the first fix. It uses CMV's trim feature (Layer 2 in the stack above) to strip the mechanical bloat out of a session: tool outputs, file dumps, base64 image blocks, and thinking signatures. Your actual conversation stays intact. Every user message and every Claude response is preserved. You just lose the verbose evidence of how it got there.
+
+A great feature here is that trim tells you the session size before and after. I had sessions go from 152K tokens down to 23K. Others barely moved. Either way, you see exactly how large the context is in the first place, and whether a deeper clean is needed.
+
+**Refresh** is the second step. It's far more aggressive, but reversible. Instead of trimming the existing conversation, it starts a completely fresh session in the same project directory. Claude is prompted to read its memory files, the project documentation, the codebase, and git history. It rebuilds its understanding from those sources instead of from a massive conversation transcript.
+
+Importantly, the old session doesn't disappear. It gets marked "(old)" and moves to the bottom of the session list. You can go back to it any time, ask it detailed questions, or pull specific context out of it. It's still on disk; it just doesn't load and burn your token budget on every interaction. There was a case where the new slim conversation was not aware of something. I went back to the old conversation one time, and asked it to add a markdown document to the project explaining the issue. Problem solved.
+
+When you should use each: trim after any session that's been running for a while. It costs nothing and gives you visibility into session size. Refresh when you've hit a milestone and the conversation has accumulated enough history that trim alone isn't enough. Don't refresh in the middle of a sprint. Wait for a natural break point where it makes sense to have Claude rebuild its understanding from salient documentation and current code rather than long conversation history.
+
+In my worst case, a session went from 16 megabytes to 250 kilobytes after a refresh. That's not a typo. The conversation was almost entirely tool output and debugging noise. Everything that mattered was already captured in memory files and project docs.
+
 ## One More Thing: Prompt Improvement
 
 This has nothing to do with context management, but it made a measurable difference and it's too simple not to mention. I tip my hat to Medium user ichigo and his recent article "I Accidentally Made Claude 45% Smarter. Here's How."
@@ -170,7 +188,7 @@ Everything described here is open source and runs locally:
 
 - **Claude-Mem** --- Cross-session AI-compressed memory. Node.js + Bun worker service.
 
-- **Prompt booster** --- One text block in ~/.claude/CLAUDE.md.
+- **Prompt booster** --- One text block in \~/.claude/CLAUDE.md.
 
 Total install time is about 20 minutes if you have Node.js already. The prompt booster is 30 seconds.
 
