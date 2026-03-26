@@ -18,7 +18,7 @@ function claudedsp {
             $parts = $line -split '\|', 3
             $sessions += [PSCustomObject]@{ Guid=$parts[0]; Dir=$parts[1]; Desc=$parts[2] }
         }
-        return $sessions
+        return ,$sessions
     }
 
     function Save-Sessions($sessions) {
