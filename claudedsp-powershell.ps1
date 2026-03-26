@@ -7,17 +7,6 @@ function claudedsp {
     $claudeExe = "$env:USERPROFILE\.local\bin\claude.exe"
     $cmvExe = "$env:APPDATA\npm\cmv.cmd"
 
-    $defaultRefreshPrompt = @'
-Read your memories. This is a fresh session replacing a long previous conversation on this project. Everything you need to know is in:
-
-1. Your memory files (MEMORY.md and all linked files)
-2. Any documentation in the project directory (markdown files, QA reviews, specs)
-3. The codebase itself (git log for history)
-4. project_current_state.md in your memory if it exists
-
-Read all of these before responding. Then tell me what you understand about: the current state of the project, what works, what is pending, and what your behavioral rules are. Do not start any development until I tell you to.
-'@
-
     if (-not (Test-Path $dspDir)) { New-Item -ItemType Directory -Path $dspDir | Out-Null }
     if (-not (Test-Path $notesDir)) { New-Item -ItemType Directory -Path $notesDir | Out-Null }
     if (-not (Test-Path $sessionsFile)) { New-Item -ItemType File -Path $sessionsFile | Out-Null }
@@ -147,6 +136,110 @@ Read all of these before responding. Then tell me what you understand about: the
         }
     }
 
+    function Do-Trim($currentGuid) {
+        if (-not (Test-Path $cmvExe)) {
+            Write-Host "  cmv not found. Skipping trim."
+            return
+        }
+        Write-Host "  Trimming session..."
+        $trimOutput = & $cmvExe trim --latest --skip-launch 2>&1 | Out-String
+        $guidMatch = [regex]::Match($trimOutput, 'Session ID:\s*([0-9a-f-]+)')
+        if (-not $guidMatch.Success) {
+            Write-Host "  Trim failed or no new session ID found."
+            $trimOutput.Split("`n") | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
+            return
+        }
+        $newGuid = $guidMatch.Groups[1].Value
+        # Update GUID in sessions.txt
+        $sessions = Get-Sessions
+        foreach ($s in $sessions) {
+            if ($s.Guid -eq $currentGuid) { $s.Guid = $newGuid }
+        }
+        Save-Sessions $sessions
+        # Rename notes file if it exists
+        $oldNote = Join-Path $notesDir "$currentGuid.txt"
+        if (Test-Path $oldNote) {
+            Move-Item $oldNote (Join-Path $notesDir "$newGuid.txt")
+        }
+        # Ensure trimmed JSONL is in the expected project dir
+        $sessions = Get-Sessions
+        $entry = $sessions | Where-Object { $_.Guid -eq $newGuid } | Select-Object -First 1
+        if ($entry) {
+            $projKey = $entry.Dir -replace ':', '-' -replace '\\', '-'
+            $expectedDir = "$env:USERPROFILE\.claude\projects\$projKey"
+            $expectedFile = Join-Path $expectedDir "$newGuid.jsonl"
+            if (-not (Test-Path $expectedFile)) {
+                $actual = Get-ChildItem "$env:USERPROFILE\.claude\projects\*\$newGuid.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($actual) {
+                    if (-not (Test-Path $expectedDir)) { New-Item -ItemType Directory -Path $expectedDir -Force | Out-Null }
+                    Copy-Item $actual.FullName $expectedFile
+                }
+            }
+        }
+        $trimOutput.Split("`n") | Where-Object { $_ -notmatch 'Session ID:' -and $_.Trim() } | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+        Write-Host ""
+        Write-Host "  Session trimmed. New ID: $newGuid"
+        $script:trimNewGuid = $newGuid
+    }
+
+    function Do-Refresh($currentGuid) {
+        $sessions = Get-Sessions
+        $curSession = $sessions | Where-Object { $_.Guid -eq $currentGuid } | Select-Object -First 1
+        $curDesc = "Unnamed"; if ($curSession) { $curDesc = $curSession.Desc }
+        $curDir = (Get-Location).Path; if ($curSession) { $curDir = $curSession.Dir }
+        Write-Host ""
+        $newName = Read-Host "  Name for new session (Enter for '$curDesc')"
+        if (-not $newName) { $newName = $curDesc }
+        # Build recovery prompt
+        $refreshPrompt = "Read your memories. This is a fresh session replacing a long previous conversation on this project. Everything you need to know is in: 1) Your memory files (MEMORY.md and all linked files) 2) Any documentation in the project directory 3) The codebase itself (git log for history) 4) project_current_state.md in your memory if it exists. Read all of these before responding. Then tell me what you understand about the current state of the project, what works, what is pending, and what your behavioral rules are. Do not start any development until I tell you to."
+        $promptFile = Join-Path $dspDir "refresh-prompt.tmp"
+        $refreshPrompt | Set-Content $promptFile
+        $editPrompt = Read-Host "  Edit the refresh prompt? (Save and close when done) [y/N]"
+        if ($editPrompt -eq 'y') {
+            $proc = Start-Process notepad $promptFile -PassThru
+            $proc.WaitForExit()
+        }
+        $promptText = Get-Content $promptFile -Raw
+        Remove-Item $promptFile -ErrorAction SilentlyContinue
+        # Run Claude headless from the session directory
+        $refreshOrigDir = Get-Location
+        Set-Location $curDir
+        Write-Host ""
+        Write-Host "  Creating fresh session, please wait..."
+        & $claudeExe --dangerously-skip-permissions -p $promptText 2>&1 | Out-Null
+        Write-Host "  Done."
+        Set-Location $refreshOrigDir
+        # Capture new session GUID
+        $projKey = $curDir -replace ':', '-' -replace '\\', '-'
+        $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
+        $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newest) {
+            $freshGuid = $newest.BaseName
+            # Rewrite sessions: new at top, old "(old)" at bottom
+            $sessions = Get-Sessions
+            $oldEntry = $null
+            $others = @()
+            foreach ($s in $sessions) {
+                if ($s.Guid -eq $currentGuid) {
+                    $oldDesc = "$($s.Desc) (old)"; if ($s.Desc -match '\(old\)') { $oldDesc = $s.Desc }
+                    $oldEntry = [PSCustomObject]@{ Guid=$s.Guid; Dir=$s.Dir; Desc=$oldDesc }
+                } else {
+                    $others += $s
+                }
+            }
+            $freshEntry = [PSCustomObject]@{ Guid=$freshGuid; Dir=$curDir; Desc=$newName }
+            $newSessions = @($freshEntry) + @($others)
+            if ($oldEntry) { $newSessions += $oldEntry }
+            Save-Sessions $newSessions
+            Write-Host ""
+            Write-Host "  Fresh session created: $newName"
+            Write-Host "  Old session moved to bottom of list."
+        } else {
+            Write-Host "  Warning: Could not find new session GUID."
+        }
+    }
+
     function Do-PostExit($knownGuid) {
         # Auto-snapshot with CMV on exit (suppress output; "active session" warning
         # is a false positive when other Claude sessions are running)
@@ -187,114 +280,18 @@ Read all of these before responding. Then tell me what you understand about: the
             if (-not (Test-Path $notePath)) { New-Item -ItemType File -Path $notePath -Force | Out-Null }
             notepad $notePath
         }
-
         # Anti-bloat: trim
         Write-Host ""
         $doTrim = Read-Host "  Trim this session? [y/N]"
         if ($doTrim -eq 'y') {
-            if (Test-Path $cmvExe) {
-                Write-Host "  Trimming session..."
-                $trimOutput = & $cmvExe trim --latest --skip-launch 2>&1 | Out-String
-                $newGuidMatch = [regex]::Match($trimOutput, 'Session ID:\s*([0-9a-f-]+)')
-                if ($newGuidMatch.Success) {
-                    $newGuid = $newGuidMatch.Groups[1].Value
-                    # Update GUID in sessions.txt
-                    $sessions = Get-Sessions
-                    foreach ($s in $sessions) {
-                        if ($s.Guid -eq $guid) { $s.Guid = $newGuid }
-                    }
-                    Save-Sessions $sessions
-                    # Rename notes file if it exists
-                    $oldNotePath = "$notesDir\$guid.txt"
-                    if (Test-Path $oldNotePath) {
-                        Move-Item $oldNotePath "$notesDir\$newGuid.txt"
-                    }
-                    $guid = $newGuid
-                    $trimOutput -split "`n" | Where-Object { $_ -notmatch 'Session ID:' -and $_.Trim() } | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
-                    Write-Host ""
-                    Write-Host "  Session trimmed. New ID: $newGuid"
-                } else {
-                    Write-Host "  Trim failed or no new session ID found."
-                    $trimOutput | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
-                }
-            } else {
-                Write-Host "  cmv not found. Skipping trim."
-            }
+            Do-Trim $guid
+            if ($script:trimNewGuid) { $guid = $script:trimNewGuid }
         }
-
         # Anti-bloat: refresh (deeper clean)
         Write-Host ""
-        $doRefresh = Read-Host "  Replace current session with a fresh one? (deeper clean) [y/N]"
+        $doRefresh = Read-Host "  Start a fresh session? (deeper clean) [y/N]"
         if ($doRefresh -eq 'y') {
-            $sessions = Get-Sessions
-            $curSession = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
-            $curDesc = if ($curSession) { $curSession.Desc } else { "Unnamed" }
-            $curDir = if ($curSession) { $curSession.Dir } else { (Get-Location).Path }
-
-            Write-Host ""
-            $newName = Read-Host "  Name for new session (Enter for '$curDesc')"
-            if (-not $newName) { $newName = $curDesc }
-
-            # Offer to edit the refresh prompt
-            $promptFile = "$dspDir\refresh-prompt.tmp"
-            $defaultRefreshPrompt | Set-Content $promptFile
-            $editPrompt = Read-Host "  Edit the refresh prompt? (Ctrl-S, close when done) [y/N]"
-            if ($editPrompt -eq 'y') {
-                Start-Process notepad $promptFile -Wait
-            }
-            $promptText = Get-Content $promptFile -Raw
-            Remove-Item $promptFile -ErrorAction SilentlyContinue
-
-            # Run Claude headless from the session's directory
-            $refreshOrigDir = Get-Location
-            Set-Location $curDir
-            Write-Host ""
-            # Spinner while Claude creates the session
-            $job = Start-Job -ScriptBlock {
-                param($exe, $prompt)
-                & $exe --dangerously-skip-permissions -p $prompt 2>&1 | Out-Null
-            } -ArgumentList $claudeExe, $promptText
-            $spin = [char[]]@('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
-            $i = 0
-            while ($job.State -eq 'Running') {
-                Write-Host "`r  $($spin[$i % $spin.Length]) Please wait while the new session is created..." -NoNewline
-                Start-Sleep -Milliseconds 100
-                $i++
-            }
-            Receive-Job $job | Out-Null
-            Remove-Job $job
-            Write-Host "`r  ✓ Done.                                              "
-            Set-Location $refreshOrigDir
-
-            # Capture new session GUID
-            $projKey = $curDir -replace ':', '-' -replace '\\', '-'
-            $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-            $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($newest) {
-                $freshGuid = $newest.BaseName
-                # Rewrite sessions: new at top, old "(old)" at bottom
-                $sessions = Get-Sessions
-                $oldEntry = $null
-                $others = @()
-                foreach ($s in $sessions) {
-                    if ($s.Guid -eq $guid) {
-                        $oldDesc = if ($s.Desc -match '\(old\)') { $s.Desc } else { "$($s.Desc) (old)" }
-                        $oldEntry = [PSCustomObject]@{ Guid=$s.Guid; Dir=$s.Dir; Desc=$oldDesc }
-                    } else {
-                        $others += $s
-                    }
-                }
-                $freshEntry = [PSCustomObject]@{ Guid=$freshGuid; Dir=$curDir; Desc=$newName }
-                $newSessions = @($freshEntry) + @($others)
-                if ($oldEntry) { $newSessions += $oldEntry }
-                Save-Sessions $newSessions
-                Write-Host ""
-                Write-Host "  Fresh session created: $newName"
-                Write-Host "  Old session moved to bottom of list."
-            } else {
-                Write-Host "  Warning: Could not find new session GUID."
-            }
+            Do-Refresh $guid
         }
     }
 
