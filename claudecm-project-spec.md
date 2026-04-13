@@ -292,7 +292,7 @@ Walk `$args`:
 2. If `projDir` was specified: validate it exists, then `cd` into it.
 3. Read sessions. Find one whose `Dir` exactly matches current directory.
 4. **If a match exists and `passArgs` is empty:**
-   - Run Do-OrphanScan. If it returns `select`, launch the picked GUID via Invoke-ClaudeLaunch, then run Do-PostExit on the resolved SessionId.
+   - Run Do-OrphanScan. If it returns `select`, launch the picked GUID via the platform's launch path (Section 11.6), then run Do-PostExit on the resulting SessionId.
    - Print `  Session found: <DESC>`.
    - Prompt: `  Rename? (Enter to keep): `. If non-empty, update DESC and save.
    - Prompt: `  Resume this session? [Y/n]: `. If `n`, fall through to fresh launch.
@@ -301,7 +301,7 @@ Walk `$args`:
      - `cd` to session's Dir.
      - Run Resolve-ResumeOrRecover.
      - Branch on action: `cancel` returns; `fresh` (after dropping the dead entry from sessions.txt) launches `claude` without `--resume`; `primed` launches `claude --resume <new-guid>`; otherwise `claude --resume <original-guid>`.
-     - All launches go through Invoke-ClaudeLaunch (Section 11.6).
+     - All launches go through the platform's launch path (Section 11.6).
      - On exit code 0, run Do-PostExit with the resolved SessionId.
      - On non-zero exit, prompt to delete the entry.
 5. **If no match and `passArgs` is empty:**
@@ -312,7 +312,7 @@ Walk `$args`:
 6. **Fresh launch (any branch that fell through):**
    - Display name = `<machine> - <preNamed or match.Desc or cwd leaf>`
    - Build args: `--dangerously-skip-permissions -n <displayName> [<passArgs>...]`
-   - Launch via Invoke-ClaudeLaunch.
+   - Launch via the platform's launch path (Section 11.6).
    - On non-zero exit, restore directory and return.
    - **If preNamed was set and SessionId resolved:** register new entry at top of sessions.txt with empty tokens; run Do-PostExit with that SessionId.
    - **Otherwise** run Do-PostExit with the resolved SessionId.
@@ -332,38 +332,44 @@ Inputs: `scan_dir`, `registered_guid`. Returns either `{ Action='select', Guid=<
    - `^[qQ]\s*(\d+)$` → quarantine: refuse if the GUID matches `registered_guid`. Otherwise move JSONL and (if present) the GUID subdirectory to `<backup-root>/<scan_dir leaf>/`. Run Sync-SessionIndex. Print `  Quarantined to backup: <leaf>/<guid>` in green.
 8. Return null in all other cases.
 
-### 11.6 Invoke-ClaudeLaunch (the only sanctioned launch path)
+### 11.6 Launch path
 
-This is the **only** function that may invoke `claude` interactively. Direct `& claude ...` or `claude ...` calls outside this function are forbidden, because they cannot capture the resulting session ID safely.
+The two implementations launch `claude` differently. Same observable behavior, different mechanisms because the platforms have different constraints. This asymmetry is intentional.
 
-Inputs: `ClaudeArgs[]`, `SessionDir`. Returns: `{ Pid; SessionId; ExitCode }`.
+#### PowerShell: direct positional invocation at every call site
 
-#### Belt-and-suspenders session ID resolution
+Each call site builds the args inline and calls `claude` directly:
 
-Three layers, in this order:
+```
+& $claudeExe --dangerously-skip-permissions [--resume <guid>] -n $displayName [@passArgs]
+```
 
-**Layer 1 (preferred where available): PID + manifest.**
-- Launch claude as a child process and capture the PID. After up to 5 seconds (poll every 250 ms), read `~/.claude/sessions/<pid>.json`. Extract `sessionId`. This is **ground truth** because it's claude.exe's own self-reported session ID.
-- **Bash:** launches with `& ... ; pid=$!`, fully working.
-- **PowerShell:** Layer 1 is currently **disabled**. The natural way to capture a child PID is `Start-Process -PassThru`, but its `-ArgumentList` parameter mangles string arguments containing spaces (e.g. display names like `stang - Brooks Scrape` become two separate args). Until we have a launch mechanism that both preserves TTY and captures PID without arg mangling, PowerShell relies on Layers 2 and 3 alone. A future enhancement could use `Start-Job` to monitor `Get-Process claude` while `& $claudeExe` runs synchronously.
+No helper function. No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `stang - VS DTE MCP server` got mangled, with the bare `-` between "stang" and "VS" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
 
-**Layer 2: project-scoped JSONL snapshot diff.**
-- Before launch, snapshot the set of UUID-named JSONL basenames in the current project key directory.
-- After launch, snapshot again. The new GUID is in the difference.
-- If multiple new GUIDs appear (rare), pick the most recently modified.
+After a successful launch, the caller infers the new session ID from the project key directory's JSONL state (snapshot diff or "newest in project key"). For resume-by-known-GUID launches, the caller already knows the GUID and uses it directly.
 
-**Layer 3 (fallback): newest in current project key.**
-- If both layers above fail, fall back to whatever JSONL has the most recent mtime in the current project key directory. Never scan across project keys.
+#### Bash: `invoke_claude_launch` helper with belt-and-suspenders
 
-#### Cross-check
+Bash properly preserves array elements as separate args when quoted with `"${args[@]}"`. So bash safely uses an array-based helper:
 
-If Layer 1 and Layer 2 disagree, print a yellow warning showing both values and prefer Layer 1 (the manifest). This disagreement signals a CMV or Claude Code bug writing files cross-project, and the user should know.
+```bash
+invoke_claude_launch --dir "$session_dir" -- --dangerously-skip-permissions [--resume <guid>] -n "$display_name"
+```
 
-If only one layer produced a value, use it. If none did, return SessionId = null (caller may fall back to Layer 3 inference inside Do-PostExit).
+Inside the helper:
+1. **Layer 2 setup:** snapshot the set of UUID-named JSONL basenames in the project key directory before launch.
+2. Launch claude as a child process: `"$CLAUDE_EXE" "${args[@]}" &; pid=$!`. Capture the PID.
+3. **Layer 1:** poll `~/.claude/sessions/<pid>.json` for up to 5 seconds (250 ms intervals). Extract `sessionId`. This is ground truth from claude itself.
+4. `wait $pid` until claude exits.
+5. **Layer 2:** snapshot again. The new GUID is in the diff.
+6. Cross-check Layer 1 vs Layer 2. If they disagree, warn yellow.
+7. Return `{ pid, session_id, exit_code }`.
 
-#### Exit handling
+**Layer 3 fallback:** if both layers fail, the caller (Do-PostExit) falls back to the most recent JSONL in the current project key directory. Never scans across project keys.
 
-Wait for the child to exit. Capture exit code. Return all three values.
+#### Why the asymmetry is OK
+
+Both paths achieve the same goal: launch claude, get back the session ID it ended up using, never confuse it with a session in a different project. The PowerShell path achieves it without a helper because the launch is direct and the project-scoped inference is sufficient. The bash path uses a helper because bash can safely splat arrays AND can capture a child PID for the manifest cross-check, both of which are wins. Forcing one mechanism on both platforms loses something on whichever platform doesn't fit.
 
 ### 11.7 Resolve-ResumeOrRecover (recovery primer flow)
 
@@ -406,36 +412,46 @@ Computed values:
 - `tok_str`: `<tokens> tokens` if tokens, else `unknown token count`.
 - `date_str`: `lastDate` if set, else `unknown`.
 
+**Critical design note.** Earlier versions of this template framed the LLM's task as "write a recovery prompt that will be saved to recovery-prompt.md." That framing primed the LLM to produce a confirmation-style summary about the file (e.g. "Recovery prompt written to recovery-prompt.md. It covers the four memory files...") instead of the actual directives. The fix was to replace freeform instructions with a fill-in-the-blank template the LLM completes verbatim. The "saved to file" wording was removed entirely. Validated in `private/meta-prompt-playground/`. Both implementations use the template below.
+
 Template (verbatim, with substitutions):
 
 ```
-You are helping the user rebuild a lost Claude Code session. The conversation transcript was deleted by Claude Code's 30-day auto-cleanup. Surviving artifacts: memory files, subagent transcripts, and the project code itself.
+Context: a Claude Code session was deleted. You need to produce orientation text for a future Claude Code session that will read this text as its first input. Produce the text. That text goes directly into the next session. It is NOT a summary, NOT a description, NOT a report about what you did. It is the directives themselves.
 
-Your task is to write a recovery prompt. It will be saved to recovery-prompt.md in the project directory. The user will edit it if they want, then start a fresh Claude Code session and tell that new Claude instance to read recovery-prompt.md and follow it. Your output is only that prompt text, ready to be saved as a file.
+Read these artifacts:
+* Memory files in <memory_dir>
+* Subagent transcripts in <subagents_dir> (2-3 most recent; total on disk: <subagent_count>, latest dated <subagent_latest>)
+* The project code at <dir>
 
-Project context:
-  Session name: <desc>
-  Project path: <dir>
-  Last activity: <date_str>
-  Conversation size when lost: <tok_str>
+Session metadata (for reference when you write):
+* Session name: <desc>
+* Project path: <dir>
+* Last activity: <date_str>
+* Conversation size when lost: <tok_str>
 
-Surviving memory files in <memory_dir>:
-<memory_list>
+Now replace every <PLACEHOLDER> below and OUTPUT the completed template. Start your output with "This is a recovery session." and end with "ask before assuming." Output nothing else. No preamble, no confirmation, no summary of what you did.
 
-Surviving subagent transcripts: <subagent_count> files in <subagents_dir>, most recent dated <subagent_latest>.
+This is a recovery session. The previous conversation transcript for "<desc>" was deleted. The project lives at <dir>. Memory, subagent state, and source code all survived.
 
-Read the surviving memory files. Look at 2-3 of the most recently modified subagent transcripts. Look at the current state of the project directory. From this, write the recovery prompt.
+Read these files in this order:
 
-The recovery prompt you write must:
+<NUMBERED LIST. Format: "1. <filename>: <one-line description of what this file contains, based on what you read in it>". Use actual file paths from the memory directory.>
 
-* Open by telling future-Claude what happened: the transcript is gone, these specific artifacts survived, this is a recovery orientation session.
-* List the specific memory files worth reading, with one-line notes on what each contains.
-* List the specific subagent transcripts worth skimming, with one-line notes on what work they represent.
-* Note any in-flight work, open questions, or decisions visible from the surviving artifacts.
-* End with this exact instruction, verbatim: "Read these in order. Do not run builds, tests, or git commands yet. Do not modify any files. After reading, report back with: (1) your understanding of project state as of the last captured activity, (2) what appears to have been in progress, (3) what you recommend doing next. Do not invent details. If something is unclear, ask before assuming."
+Then skim these subagent transcripts for context on in-flight work:
 
-Output only the recovery prompt itself, as plain prose. No preamble, no commentary, no markdown formatting. CRITICAL: do not start any line with the character '-'. Use '*' or numeric prefixes for any lists. Lines starting with '-' are interpreted as CLI flags by Claude Code's input parser and will break the recovery flow.
+<BULLETED LIST using "*" not "-". Format: "* <filename>: <what this subagent was doing>". Use 2-3 of the most recently modified subagent transcripts. If there are zero subagent transcripts, replace this whole list with the single line: "No surviving subagent transcripts.">
+
+Open questions or in-flight work visible from the artifacts:
+
+<BULLETED LIST using "*" not "-". One line per item. If nothing specific is identifiable, replace this whole list with: "None identified from the artifacts.">
+
+Read these in order. Do not run builds, tests, or git commands yet. Do not modify any files. After reading, report back with: (1) your understanding of project state as of the last captured activity, (2) what appears to have been in progress, (3) what you recommend doing next. Do not invent details. If something is unclear, ask before assuming.
 ```
+
+**Why this works.** The template includes both the meta-instructions AND the document body the LLM is supposed to complete. The placeholder syntax (`<NUMBERED LIST. Format: ...>`) gives the LLM specific structure to fill rather than a freeform task to interpret. The "OUTPUT the completed template" framing leaves no room for confirmation messages because there's no place to write one without breaking the requested format. The "no preamble, no confirmation, no summary" prohibition is reinforced by the structural requirement to start with literal text "This is a recovery session." and end with literal text "ask before assuming."
+
+**Why we use `*` not `-` for bullets.** Claude Code's input parser interprets a line starting with `-` as a CLI flag attempt. When recovery-prompt.md is later fed to a new Claude session, any `- bullet` line would break the parse. Using `*` avoids the problem.
 
 ### 11.8 New project from list mode
 
@@ -447,7 +463,7 @@ If user types non-numeric, non-special input at the list mode prompt, treat it a
 4. Print: blank line, `  Starting new session: <title>`, `  Project dir: <newProjDir>`.
 5. `cd` into it.
 6. Display name = `<machine> - <title>`.
-7. Launch via Invoke-ClaudeLaunch.
+7. Launch via the platform's launch path (Section 11.6).
 8. After exit, if SessionId was resolved, register at top of sessions.txt with empty tokens, dir = newProjDir, desc = title.
 9. Restore original directory.
 
@@ -459,14 +475,14 @@ Inputs: `pick`, `sessions`.
 2. Save original location, `cd` to `sel.Dir`.
 3. Run Do-OrphanScan. If user selected an orphan to resume:
    - Display name = `<machine> - <sel.Desc>`
-   - Launch via Invoke-ClaudeLaunch with `--resume <orphan-guid>`.
-   - On exit code 0, Do-PostExit with the resolved SessionId (preferring Layer 1, falling back to the orphan-guid we asked for).
+   - Launch via the platform's launch path (Section 11.6) with `--resume <orphan-guid>`.
+   - On exit code 0, Do-PostExit with the orphan-guid we asked for.
    - Restore directory, return.
 4. Run Resolve-ResumeOrRecover:
    - cancel → restore, return
-   - fresh → drop the dead entry from sessions.txt, launch via Invoke-ClaudeLaunch (no `--resume`), Do-PostExit with the resolved SessionId
-   - primed → launch via Invoke-ClaudeLaunch with `--resume <recover.Guid>`, Do-PostExit with resolved SessionId (preferring Layer 1)
-   - normal → launch via Invoke-ClaudeLaunch with `--resume <sel.Guid>`, Do-PostExit with resolved SessionId (preferring Layer 1)
+   - fresh → launch via Section 11.6 (no `--resume`). On successful launch with new SessionId, swap the dead entry's GUID for the new one in place (preserving desc and dir, resetting tokens). Then Do-PostExit. **Critical:** do NOT delete the dead entry before launching — if launch fails, the entry would be unrecoverable.
+   - primed → launch with `--resume <recover.Guid>`, Do-PostExit
+   - normal → launch with `--resume <sel.Guid>`, Do-PostExit
 5. If the normal-resume launch exits non-zero (session not found):
    - Prompt: `  Session not found. Delete this entry? [Y/n]: ` (default Y)
    - If not `n`, remove the entry from sessions.txt.
@@ -612,7 +628,7 @@ If skeleton present, append:
 8. Read the (possibly edited) prompt, delete temp file.
 9. `cd` to session directory.
 10. Print `  Creating fresh session, please wait...`
-11. Run `claude --dangerously-skip-permissions -p <prompt-text>`. Discard output. (This is the one place where `claude -p` is invoked outside Invoke-ClaudeLaunch; it's headless and one-shot.)
+11. Run `claude --dangerously-skip-permissions -p <prompt-text>`. Discard output. (Headless one-shot; not subject to the launch-path mechanics in Section 11.6.)
 12. Print `  Done.`
 13. Restore directory.
 14. Find the new session GUID: newest JSONL under project key directory whose basename ≠ old GUID. If none, print warning and return.
@@ -685,7 +701,7 @@ ClaudeCM users routinely run multiple sessions in parallel windows. Every operat
 1. **Never use `cmv --latest`.** It selects globally across projects. Always pass `-s <specific-guid>`.
 2. **Never scan `~/.claude/projects/*/` for "newest JSONL".** Always scope to the current project key directory.
 3. **Never silently copy JSONLs between project directories.** If CMV writes to the wrong location, fail loudly.
-4. **Always resolve session ID via Invoke-ClaudeLaunch's belt-and-suspenders before running cmv operations.** No inference based on file mtimes alone.
+4. **Always resolve session ID before running cmv operations.** Use the GUID the caller knows (resume case), or the launch helper's belt-and-suspenders (bash), or post-launch project-scoped inference (PowerShell). Never run cmv against an unidentified "current" session.
 5. **All sessions.txt mutations hold the lock and write atomically.**
 6. **All scratch directories are per-operation scoped** (refresh-temp).
 
