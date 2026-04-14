@@ -137,9 +137,9 @@ Reads alone do not need the lock; partial reads return whatever is on disk at th
 Convert any directory path to Claude Code's project-key format. Rule: replace **every** non-alphanumeric character with `-`.
 
 Examples:
-- `C:\Users\Bob\documents\github\claudecm-stack` → `C--Users-Bob-documents-github-claudecm-stack`
-- `C:\Users\Bob\Documents\NinjaTrader 8` → `C--Users-Bob-Documents-NinjaTrader-8`
-- `C:\Users\Bob\Documents\GitHub\WPF-Connector.Claude` → `C--Users-Bob-Documents-GitHub-WPF-Connector-Claude`
+- `C:\Users\alice\projects\my-app` → `C--Users-alice-projects-my-app`
+- `C:\Users\alice\Documents\Some App 8` → `C--Users-alice-Documents-Some-App-8`
+- `C:\Users\alice\Documents\GitHub\WPF-Connector.Thing` → `C--Users-alice-Documents-GitHub-WPF-Connector-Thing`
 - `/home/user/projects/foo` → `-home-user-projects-foo`
 
 The project key is used as the directory name under `~/.claude/projects/`.
@@ -344,7 +344,7 @@ Each call site builds the args inline and calls `claude` directly:
 & $claudeExe --dangerously-skip-permissions [--resume <guid>] -n $displayName [@passArgs]
 ```
 
-No helper function. No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `stang - VS DTE MCP server` got mangled, with the bare `-` between "stang" and "VS" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
+No helper function. No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `desktop - My Project` get mangled, with the bare `-` between "desktop" and "My" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
 
 After a successful launch, the caller infers the new session ID from the project key directory's JSONL state (snapshot diff or "newest in project key"). For resume-by-known-GUID launches, the caller already knows the GUID and uses it directly.
 
