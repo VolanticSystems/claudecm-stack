@@ -1022,7 +1022,7 @@ EOF
     local prompt_file="$CM_DIR/refresh-prompt.tmp"
     echo "$refresh_prompt" > "$prompt_file"
 
-    read -rp "  Edit the compaction prompt and skeleton? (Save and close when done) [y/N] " edit_prompt
+    read -rp "  Would you like to view/edit the compaction prompt and skeleton before proceeding? (Save and close when done) [y/N] " edit_prompt
     if [[ "$edit_prompt" =~ ^[yY]$ ]]; then
         "$EDITOR" "$prompt_file"
     fi
@@ -1070,25 +1070,44 @@ EOF
         if $in_archived; then [[ -n "$line" ]] && echo "$line" >> "$arch_tmp"; continue; fi
         [[ -z "$line" ]] && continue
         local g; g=$(echo "$line" | cut -d'|' -f1)
-        if [[ "$g" == "$current_guid" ]]; then
-            had_old=true
-            local d t s
-            d=$(echo "$line" | cut -d'|' -f2)
-            t=$(echo "$line" | cut -d'|' -f3)
-            s=$(echo "$line" | cut -d'|' -f4)
-            if [[ "$t" =~ \(old[[:space:]]+([0-9]+)\)$ ]]; then
-                local n=$((${BASH_REMATCH[1]} + 1))
-                old_desc=$(echo "$t" | sed -E "s/\(old[[:space:]]+[0-9]+\)$/(old $n)/")
-            elif [[ "$t" =~ \(old\)$ ]]; then
-                old_desc=$(echo "$t" | sed -E 's/\(old\)$/(old 2)/')
+            if [[ "$g" == "$current_guid" ]]; then
+                had_old=true
+                local d s base_desc
+                d=$(echo "$line" | cut -d'|' -f2)
+                t=$(echo "$line" | cut -d'|' -f3)
+                s=$(echo "$line" | cut -d'|' -f4)
+                base_desc=$(echo "$t" | sed -E 's/[[:space:]]*\(old([[:space:]]+[0-9]+)?\)[[:space:]]*$//')
+                local max_old=0 n
+                while IFS= read -r scan_line; do
+                    [[ "$scan_line" == "[archived]" ]] && break
+                    [[ -z "$scan_line" ]] && continue
+                    local sg sd st
+                    sg=$(echo "$scan_line" | cut -d'|' -f1)
+                    [[ "$sg" == "$current_guid" ]] && continue
+                    sd=$(echo "$scan_line" | cut -d'|' -f2)
+                    [[ "$sd" != "$d" ]] && continue
+                    st=$(echo "$scan_line" | cut -d'|' -f3)
+                    if [[ "$st" == "$base_desc (old)" ]]; then
+                        [[ $max_old -lt 1 ]] && max_old=1
+                    elif [[ "$st" == "$base_desc (old "*")" ]]; then
+                        local num_part="${st#$base_desc (old }"
+                        num_part="${num_part%)}"
+                        if [[ "$num_part" =~ ^[0-9]+$ ]]; then
+                            n="$num_part"
+                            [[ $n -gt $max_old ]] && max_old=$n
+                        fi
+                    fi
+                done < "$SESSIONS_FILE"
+                local next_num=$((max_old + 1))
+                if [[ $next_num -eq 1 ]]; then
+                    old_desc="$base_desc (old)"
+                else
+                    old_desc="$base_desc (old $next_num)"
+                fi
+                echo "$current_guid|$d|$old_desc|$s" > "$main_tmp.old"
             else
-                old_desc="$t (old)"
+                echo "$line" >> "$main_tmp"
             fi
-            # Stash old entry (we'll append later)
-            echo "$current_guid|$d|$old_desc|$s" > "$main_tmp.old"
-        else
-            echo "$line" >> "$main_tmp"
-        fi
     done < "$SESSIONS_FILE"
 
     {
