@@ -987,22 +987,39 @@ IMPORTANT:
         Write-Host ""
         if (-not $knownGuid) { return }
         $guid = $knownGuid
-        # Auto-snapshot with CMV (now that we have a guid, use -s instead of --latest)
+        # Auto-snapshot with CMV (now that we have a guid, use -s instead of --latest).
+        # Failure of the snapshot job is non-fatal: Do-PostExit's main purpose is
+        # to update token counts and offer trim/refresh; snapshot is nice-to-have.
+        # If the job crashes or times out, log at dark-gray and continue.
         if (Test-Path $cmvExe) {
-            $snapLabel = "auto-exit-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            $job = Start-Job -ScriptBlock {
-                param($exe, $label, $sid)
-                & $exe snapshot $label -s $sid 2>&1
-            } -ArgumentList $cmvExe, $snapLabel, $guid
-            $spin = @('-', '\', '|', '/')
-            $i = 0
-            while ($job.State -eq 'Running') {
-                Write-Host "`r  $($spin[$i % 4]) Saving snapshot..." -NoNewline
-                Start-Sleep -Milliseconds 100
-                $i++
+            try {
+                $snapLabel = "auto-exit-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                $job = Start-Job -ScriptBlock {
+                    param($exe, $label, $sid)
+                    & $exe snapshot $label -s $sid 2>&1
+                } -ArgumentList $cmvExe, $snapLabel, $guid
+                $spin = @('-', '\', '|', '/')
+                $i = 0
+                $spinDeadline = (Get-Date).AddMinutes(2)
+                while ($job.State -eq 'Running') {
+                    if ((Get-Date) -gt $spinDeadline) {
+                        Write-Host "`r  Snapshot exceeded 2-minute timeout; skipping.  "
+                        Stop-Job $job -ErrorAction SilentlyContinue
+                        break
+                    }
+                    Write-Host "`r  $($spin[$i % 4]) Saving snapshot..." -NoNewline
+                    Start-Sleep -Milliseconds 100
+                    $i++
+                }
+                if ($job.State -eq 'Failed') {
+                    Write-Host "`r  Snapshot job failed; continuing.                  "
+                } elseif ($job.State -eq 'Completed') {
+                    Write-Host "`r  Done.                        "
+                }
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-Host "  Snapshot job threw: $_. Continuing."
             }
-            Write-Host "`r  Done.                        "
-            Remove-Job $job -Force
         }
         $sessions = Get-Sessions
         $existing = $sessions | Where-Object { $_.Guid -eq $guid }
