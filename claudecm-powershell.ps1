@@ -1064,6 +1064,46 @@ IMPORTANT:
         }
     }
 
+    function Invoke-ResumeWithForkDetection($originalGuid, $projectDir, $displayName) {
+        # Claude Code can fork a resumed session to a new JSONL (version upgrades across resumes,
+        # deferred-tool recovery, etc). When that happens, the live file's basename differs from
+        # the guid we passed to --resume. Detect the fork and update sessions.txt accordingly so
+        # the predecessor doesn't become an orphan on next launch.
+        $projKey = Get-ProjectKey $projectDir
+        $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
+        $beforeNewest = $null
+        if (Test-Path $projDirClaude) {
+            $beforeNewest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        }
+        & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName
+        $exitCode = $LASTEXITCODE
+        $effectiveGuid = $originalGuid
+        if ($exitCode -eq 0 -and (Test-Path $projDirClaude)) {
+            $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($newest -and $newest.BaseName -ne $originalGuid -and (-not $beforeNewest -or $newest.BaseName -ne $beforeNewest.BaseName)) {
+                $sessions = Get-Sessions
+                $found = $false
+                foreach ($s in $sessions) {
+                    if ($s.Guid -eq $originalGuid) { $s.Guid = $newest.BaseName; $s.Tokens = ''; $found = $true }
+                }
+                if ($found) { Save-Sessions $sessions }
+                $effectiveGuid = $newest.BaseName
+                $predFile = Join-Path $projDirClaude "$originalGuid.jsonl"
+                if (Test-Path $predFile) {
+                    $destSubdir = Join-Path $backupDir (Split-Path $projectDir -Leaf)
+                    if (-not (Test-Path $destSubdir)) { New-Item -ItemType Directory -Path $destSubdir -Force | Out-Null }
+                    Move-Item $predFile (Join-Path $destSubdir "$originalGuid.jsonl") -Force
+                    $predGuidDir = Join-Path $projDirClaude $originalGuid
+                    if (Test-Path $predGuidDir) { Move-Item $predGuidDir (Join-Path $destSubdir $originalGuid) -Force }
+                    Sync-SessionIndex $projectDir
+                }
+            }
+        }
+        return @{ ExitCode = $exitCode; EffectiveGuid = $effectiveGuid }
+    }
+
     function Do-Resume($pick, $sessions) {
         if ($pick -lt 1 -or $pick -gt $sessions.Count) {
             Write-Host "  Invalid selection."
@@ -1079,10 +1119,8 @@ IMPORTANT:
         $scanResult = Do-OrphanScan $sel.Dir $sel.Guid
         if ($scanResult -and $scanResult.Action -eq 'select') {
             $displayName = Get-SessionDisplayName $sel.Desc
-            & $claudeExe --dangerously-skip-permissions --resume $scanResult.Guid -n $displayName
-            if ($LASTEXITCODE -eq 0) {
-                Do-PostExit $scanResult.Guid
-            }
+            $r = Invoke-ResumeWithForkDetection $scanResult.Guid $sel.Dir $displayName
+            if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
             Set-Location $origDir
             return
         }
@@ -1117,16 +1155,14 @@ IMPORTANT:
             return
         }
         if ($recover.Action -eq 'primed') {
-            & $claudeExe --dangerously-skip-permissions --resume $recover.Guid -n $displayName
-            if ($LASTEXITCODE -eq 0) {
-                Do-PostExit $recover.Guid
-            }
+            $r = Invoke-ResumeWithForkDetection $recover.Guid $sel.Dir $displayName
+            if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
             Set-Location $origDir
             return
         }
-        & $claudeExe --dangerously-skip-permissions --resume $sel.Guid -n $displayName
-        if ($LASTEXITCODE -eq 0) {
-            Do-PostExit $sel.Guid
+        $r = Invoke-ResumeWithForkDetection $sel.Guid $sel.Dir $displayName
+        if ($r.ExitCode -eq 0) {
+            Do-PostExit $r.EffectiveGuid
         } else {
             # Distinguish "JSONL is actually missing" from "Claude refused to resume but the file is there"
             $projKey = Get-ProjectKey $sel.Dir
@@ -1272,10 +1308,8 @@ IMPORTANT:
                 }
                 Set-Location $match.Dir
                 $displayName = Get-SessionDisplayName $match.Desc
-                & $claudeExe --dangerously-skip-permissions --resume $scanResult.Guid -n $displayName
-                if ($LASTEXITCODE -eq 0) {
-                    Do-PostExit $scanResult.Guid
-                }
+                $r = Invoke-ResumeWithForkDetection $scanResult.Guid $match.Dir $displayName
+                if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
                 if ($projDir) { Set-Location $origDir }
                 return
             }
@@ -1323,16 +1357,14 @@ IMPORTANT:
                     return
                 }
                 if ($recover.Action -eq 'primed') {
-                    & $claudeExe --dangerously-skip-permissions --resume $recover.Guid -n $displayName
-                    if ($LASTEXITCODE -eq 0) {
-                        Do-PostExit $recover.Guid
-                    }
+                    $r = Invoke-ResumeWithForkDetection $recover.Guid $match.Dir $displayName
+                    if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
                     if ($projDir) { Set-Location $origDir }
                     return
                 }
-                & $claudeExe --dangerously-skip-permissions --resume $match.Guid -n $displayName
-                if ($LASTEXITCODE -eq 0) {
-                    Do-PostExit $match.Guid
+                $r = Invoke-ResumeWithForkDetection $match.Guid $match.Dir $displayName
+                if ($r.ExitCode -eq 0) {
+                    Do-PostExit $r.EffectiveGuid
                 } else {
                     $projKey = Get-ProjectKey $match.Dir
                     $jsonlPath = "$env:USERPROFILE\.claude\projects\$projKey\$($match.Guid).jsonl"
