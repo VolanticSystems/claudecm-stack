@@ -976,26 +976,17 @@ IMPORTANT:
     }
 
     function Do-PostExit($knownGuid) {
-        # Resolve session GUID first (must be unambiguous before we run cmv operations
-        # that previously used --latest, which is unsafe with concurrent sessions).
+        # Requires an unambiguous session GUID from the caller. The helpers
+        # Invoke-FreshLaunchWithDetection (11.6.2) and Invoke-ResumeWithForkDetection
+        # (11.6.1) capture the GUID via set-diff snapshot; every caller now passes
+        # that GUID. Fallback "newest-in-project-key" scan was removed because it
+        # picks stale pre-existing files when the caller couldn't produce a GUID
+        # (user bailed at splash, launch produced nothing), which mis-registers.
         Write-Host ""
         Write-Host "  Session ended."
         Write-Host ""
-        if ($knownGuid) {
-            $guid = $knownGuid
-        } else {
-            # Scope the search to the current project's directory only.
-            # NEVER scan all projects: cross-project "latest" is the bug that caused
-            # session contamination in April 2026.
-            $projKey = Get-ProjectKey (Get-Location).Path
-            $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-            if (-not (Test-Path $projDirClaude)) { return }
-            $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notlike 'agent-*' } |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $newest) { return }
-            $guid = $newest.BaseName
-        }
+        if (-not $knownGuid) { return }
+        $guid = $knownGuid
         # Auto-snapshot with CMV (now that we have a guid, use -s instead of --latest)
         if (Test-Path $cmvExe) {
             $snapLabel = "auto-exit-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -1452,11 +1443,9 @@ IMPORTANT:
             $sessions = @($newEntry) + @($sessions)
             Save-Sessions $sessions
             Do-PostExit $r.NewGuid
-        } else {
-            Do-PostExit
         }
-    } else {
-        if ($r.NewGuid) { Do-PostExit $r.NewGuid } else { Do-PostExit }
+    } elseif ($r.NewGuid) {
+        Do-PostExit $r.NewGuid
     }
 
     if ($projDir) { Set-Location $origDir }

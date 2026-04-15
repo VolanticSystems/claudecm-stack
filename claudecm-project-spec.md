@@ -726,10 +726,10 @@ If skeleton present, append:
 
 ### 11.15 Do-PostExit
 
-Runs after every interactive Claude session that exited cleanly. Argument: `knownGuid` (optional but strongly recommended; the new launch helper always provides it).
+Runs after every interactive Claude session that exited cleanly. Argument: `knownGuid` (required in practice; every caller passes one via the set-diff detection in Sections 11.6.1 and 11.6.2).
 
 1. Print blank line, `  Session ended.`, blank line.
-2. **Resolve GUID.** If `knownGuid` provided, use it. Otherwise scan **only** the current project key directory for the most recently modified non-`agent-*` JSONL. Never scan across project keys. If none found, return.
+2. **Resolve GUID.** Use `knownGuid`. If unset or empty, return immediately without running snapshot, token update, sync, or trim/refresh prompts. The prior fallback that scanned the project key dir for "newest non-agent-* JSONL" was removed: it picked stale pre-existing files when the caller legitimately had no new session (user bailed at claude splash, launch produced nothing), mis-registering the wrong session in sessions.txt. Callers that can't produce a GUID must skip Do-PostExit entirely rather than call it with null hoping the fallback saves them.
 3. **Auto-snapshot via CMV (using -s <guid>, never --latest).** Snapshot label = `auto-exit-<yyyyMMdd-HHmmss>`. Run `cmv snapshot <label> -s <guid>` in a background job with a spinner: `  - Saving snapshot...` rotating `- \ | /`. When done, replace with `  Done.`
 4. Look up entry in sessions.txt by GUID.
 5. **If found:**
