@@ -790,6 +790,18 @@ ClaudeCM users routinely run multiple sessions in parallel windows. Every operat
 
 Violating any of these can corrupt sessions across projects.
 
+### 14.1 Accepted residual concurrency limitations
+
+The following known races are documented and left unfixed because the mitigation cost exceeds the demonstrated impact. If any of these ever produce a real incident in the field, revisit.
+
+1. **sessions.txt reads are unlocked.** `Get-Sessions` / `Get-ArchivedSessions` do not acquire a shared lock. Writes use atomic rename (write to `.tmp`, then rename over the target), which is observably-atomic on both NTFS and POSIX: readers see either the old file or the new one, never a partial state. Adding a shared reader lock would add complexity to every read path (including the read-modify-write patterns in Do-EditList and Do-ViewArchived) with no observable benefit as long as the atomic-rename contract holds. If a future Windows/NTFS edge case breaks rename atomicity, revisit.
+
+2. **Sync-SessionIndex during live writes.** `Sync-SessionIndex` scans all JSONLs in a project dir to rebuild `sessions-index.json`. If a Claude session is actively writing during the scan, the index could miss entries or capture pre-write state. The index is disposable metadata that Claude Code's `/resume` picker uses for display only; wrong entries fix themselves on the next sync call. Not worth locking the index rebuild against live writes.
+
+3. **recovery-prompt.md rotation is unlocked.** If two ClaudeCM windows concurrently generate recovery prompts for different sessions in the same project directory within milliseconds of each other, the `.old` / `.oldN` rotation can clobber. Extremely unlikely in practice (recovery generation is user-initiated and takes ~60s of wall time during which the user is engaged with a single window). Accepted.
+
+4. **Backup file rotation race.** Backups of sessions.txt are rotated by keeping the 20 most recent and deleting older ones. If two ClaudeCM windows rotate in the same second, one could delete a backup the other just created. Worst case: one fewer historical backup than intended. No data loss from the live system. Accepted.
+
 ---
 
 ## 15. Script-scoped state
