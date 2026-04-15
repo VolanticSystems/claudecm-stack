@@ -371,6 +371,40 @@ Inside the helper:
 
 Both paths achieve the same goal: launch claude, get back the session ID it ended up using, never confuse it with a session in a different project. The PowerShell path achieves it without a helper because the launch is direct and the project-scoped inference is sufficient. The bash path uses a helper because bash can safely splat arrays AND can capture a child PID for the manifest cross-check, both of which are wins. Forcing one mechanism on both platforms loses something on whichever platform doesn't fit.
 
+#### Linux platform notes
+
+**Root re-exec.** The bash script must re-exec as the `claude` user when run as root. Without this, `$HOME` resolves to `/root/` and all state goes to the wrong location. Add at the top of the script, before any variable initialization:
+
+```bash
+if [[ $(id -u) -eq 0 ]]; then
+    exec sudo -u claude "$0" "$@"
+fi
+```
+
+**User prompts: do not use `read -rp`.** Bash's `read -p` sends the prompt string to stderr. When the script runs through `exec sudo -u claude`, stderr may not be connected to the terminal, causing prompts to vanish. The user sees what looks like a hang (the script is waiting for input, but no prompt is visible). Use `printf` to stdout followed by `read -r` instead:
+
+```bash
+# Wrong (prompt invisible under sudo re-exec):
+read -rp "  Trim this session? [y/N]: " do_trim
+
+# Correct:
+printf '  Trim this session? [y/N]: '; read -r do_trim
+```
+
+This applies to every user-facing prompt in the script. The PowerShell implementation is unaffected; `Read-Host` always writes to the console.
+
+**Display name flag (`-n`).** The `-n` flag for setting a session display name in the Claude mobile/remote UI is not supported on all Claude Code versions. The Linux implementation omits it. If a future Claude Code update adds support, it can be re-enabled.
+
+**Direct execution vs sourcing.** The script is structured as a function (`claudecm()`) for compatibility with sourcing from `.bashrc`. When executed directly (not sourced), a guard at the bottom invokes the function:
+
+```bash
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    claudecm "$@"
+fi
+```
+
+---
+
 ### 11.6.1 Resume with fork detection
 
 Inputs: `originalGuid`, `projectDir`, `displayName`. Returns: `{ ExitCode, EffectiveGuid }`.
