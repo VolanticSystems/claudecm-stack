@@ -1064,6 +1064,41 @@ IMPORTANT:
         }
     }
 
+    function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs) {
+        # Fresh launch (no --resume) with set-diff detection of the new session's GUID.
+        # Returns @{ ExitCode; NewGuid }. NewGuid is $null if launch produced no new
+        # UUID JSONL (user exited at splash, launch failed, etc).
+        # Immune to concurrent writers that touch or create other JSONLs mid-launch
+        # EXCEPT when two fresh launches race in the exact same project-key dir
+        # within one ClaudeCM invocation (see race-conditions doc, residual case).
+        $projKey = Get-ProjectKey $projectDir
+        $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
+        $uuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        $before = @{}
+        if (Test-Path $projDirClaude) {
+            Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -match $uuidPattern } |
+                ForEach-Object { $before[$_.BaseName] = $true }
+        }
+        if ($passArgs -and $passArgs.Count -gt 0) {
+            & $claudeExe --dangerously-skip-permissions -n $displayName @passArgs
+        } else {
+            & $claudeExe --dangerously-skip-permissions -n $displayName
+        }
+        $exitCode = $LASTEXITCODE
+        $newGuid = $null
+        if ($exitCode -eq 0 -and (Test-Path $projDirClaude)) {
+            $newFiles = @(Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -match $uuidPattern -and -not $before.ContainsKey($_.BaseName) })
+            if ($newFiles.Count -eq 1) {
+                $newGuid = $newFiles[0].BaseName
+            } elseif ($newFiles.Count -gt 1) {
+                $newGuid = ($newFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1).BaseName
+            }
+        }
+        return @{ ExitCode = $exitCode; NewGuid = $newGuid }
+    }
+
     function Test-CleanExitTail($jsonlPath) {
         # Returns $true if the tail of the JSONL shows a clean /exit (trailing
         # user "/exit" command). Claude Code's resume refuses these because the
@@ -1158,28 +1193,17 @@ IMPORTANT:
         if ($recover.Action -eq 'cancel') { Set-Location $origDir; return }
         $displayName = Get-SessionDisplayName $sel.Desc
         if ($recover.Action -eq 'fresh') {
-            # Do NOT delete the old entry before launch. Discover the new GUID after
-            # a successful launch by finding the newest JSONL in this project's dir.
-            $projKey = Get-ProjectKey $sel.Dir
-            $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-            $beforeNewest = $null
-            if (Test-Path $projDirClaude) {
-                $beforeNewest = (Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-            }
-            & $claudeExe --dangerously-skip-permissions -n $displayName
-            if ($LASTEXITCODE -eq 0) {
-                $newJsonl = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if ($newJsonl -and (-not $beforeNewest -or $newJsonl.BaseName -ne $beforeNewest.BaseName)) {
-                    # Swap GUID in place, preserve desc and dir, reset tokens.
-                    $sessions = Get-Sessions
-                    foreach ($s in $sessions) {
-                        if ($s.Guid -eq $sel.Guid) { $s.Guid = $newJsonl.BaseName; $s.Tokens = '' }
-                    }
-                    Save-Sessions $sessions
-                    Do-PostExit $newJsonl.BaseName
+            # Do NOT delete the old entry before launch. After a successful launch,
+            # detect the new session via set-diff snapshot (Invoke-FreshLaunchWithDetection).
+            $r = Invoke-FreshLaunchWithDetection $sel.Dir $displayName @()
+            if ($r.ExitCode -eq 0 -and $r.NewGuid) {
+                # Swap GUID in place, preserve desc and dir, reset tokens.
+                $sessions = Get-Sessions
+                foreach ($s in $sessions) {
+                    if ($s.Guid -eq $sel.Guid) { $s.Guid = $r.NewGuid; $s.Tokens = '' }
                 }
+                Save-Sessions $sessions
+                Do-PostExit $r.NewGuid
             }
             Set-Location $origDir
             return
@@ -1271,14 +1295,10 @@ IMPORTANT:
             $origDir = Get-Location
             Set-Location $newProjDir
             $displayName = Get-SessionDisplayName $pick
-            & $claudeExe --dangerously-skip-permissions -n $displayName
-            $projKey = Get-ProjectKey (Get-Location).Path
-            $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-            $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($newest) {
+            $r = Invoke-FreshLaunchWithDetection $newProjDir $displayName @()
+            if ($r.ExitCode -eq 0 -and $r.NewGuid) {
                 $sessions = Get-Sessions
-                $newEntry = [PSCustomObject]@{ Guid=$newest.BaseName; Dir=$newProjDir; Desc=$pick; Tokens='' }
+                $newEntry = [PSCustomObject]@{ Guid=$r.NewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
                 $sessions = @($newEntry) + @($sessions)
                 Save-Sessions $sessions
             }
@@ -1362,26 +1382,15 @@ IMPORTANT:
                 if ($recover.Action -eq 'cancel') { if ($projDir) { Set-Location $origDir }; return }
                 $displayName = Get-SessionDisplayName $match.Desc
                 if ($recover.Action -eq 'fresh') {
-                    # Do NOT delete the old entry before launch. Detect new GUID via project-scoped newest JSONL.
-                    $projKey = Get-ProjectKey $match.Dir
-                    $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-                    $beforeNewest = $null
-                    if (Test-Path $projDirClaude) {
-                        $beforeNewest = (Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                            Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-                    }
-                    & $claudeExe --dangerously-skip-permissions -n $displayName
-                    if ($LASTEXITCODE -eq 0) {
-                        $newJsonl = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-                            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                        if ($newJsonl -and (-not $beforeNewest -or $newJsonl.BaseName -ne $beforeNewest.BaseName)) {
-                            $sessions = Get-Sessions
-                            foreach ($s in $sessions) {
-                                if ($s.Guid -eq $match.Guid) { $s.Guid = $newJsonl.BaseName; $s.Tokens = '' }
-                            }
-                            Save-Sessions $sessions
-                            Do-PostExit $newJsonl.BaseName
+                    # Do NOT delete the old entry before launch. Detect new GUID via set-diff snapshot.
+                    $r = Invoke-FreshLaunchWithDetection $match.Dir $displayName @()
+                    if ($r.ExitCode -eq 0 -and $r.NewGuid) {
+                        $sessions = Get-Sessions
+                        foreach ($s in $sessions) {
+                            if ($s.Guid -eq $match.Guid) { $s.Guid = $r.NewGuid; $s.Tokens = '' }
                         }
+                        Save-Sessions $sessions
+                        Do-PostExit $r.NewGuid
                     }
                     if ($projDir) { Set-Location $origDir }
                     return
@@ -1429,35 +1438,25 @@ IMPORTANT:
 
     $launchDesc = if ($preNamed) { $preNamed } elseif ($match) { $match.Desc } else { (Split-Path (Get-Location).Path -Leaf) }
     $displayName = Get-SessionDisplayName $launchDesc
-    if ($passArgs.Count -gt 0) {
-        & $claudeExe --dangerously-skip-permissions -n $displayName @passArgs
-    } else {
-        & $claudeExe --dangerously-skip-permissions -n $displayName
-    }
-
-    if ($LASTEXITCODE -ne 0) {
+    $r = Invoke-FreshLaunchWithDetection $curDir $displayName $passArgs
+    if ($r.ExitCode -ne 0) {
         if ($projDir) { Set-Location $origDir }
         return
     }
 
     if ($preNamed) {
-        # Session was pre-named before launch; register it then run post-exit
-        $projKey = Get-ProjectKey (Get-Location).Path
-        $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
-        $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($newest) {
-            $newGuid = $newest.BaseName
+        # Session was pre-named before launch; register it then run post-exit.
+        if ($r.NewGuid) {
             $sessions = Get-Sessions
-            $newEntry = [PSCustomObject]@{ Guid=$newGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
+            $newEntry = [PSCustomObject]@{ Guid=$r.NewGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
             $sessions = @($newEntry) + @($sessions)
             Save-Sessions $sessions
-            Do-PostExit $newGuid
+            Do-PostExit $r.NewGuid
         } else {
             Do-PostExit
         }
     } else {
-        Do-PostExit
+        if ($r.NewGuid) { Do-PostExit $r.NewGuid } else { Do-PostExit }
     }
 
     if ($projDir) { Set-Location $origDir }
