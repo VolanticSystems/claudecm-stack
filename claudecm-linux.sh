@@ -11,6 +11,11 @@
 # faithful port of the PowerShell implementation, built from the spec.
 # Exercise caution and verify behavior before relying on it.
 
+# If running as root, re-exec as claude user
+if [[ $(id -u) -eq 0 ]]; then
+    exec sudo -u claude "$0" "$@"
+fi
+
 # ==================================================================
 # Color helpers
 # ==================================================================
@@ -425,7 +430,7 @@ __cm_do_orphan_scan() {
     __cm_say "* = registered session for this directory"
     __cm_blank
     __cm_say "Actions: [number] to select, [q number] to quarantine to backup, [Enter] to continue with registered session"
-    local cmd; read -rp "  >: " cmd
+    local cmd; printf '  >: '; read -r cmd
     if [[ "$cmd" =~ ^[0-9]+$ ]]; then
         local idx=$((cmd - 1))
         if (( idx >= 0 && idx < ${#files[@]} )); then
@@ -522,7 +527,7 @@ __cm_do_view_archived() {
         __cm_blank
         __cm_say "U# = Unarchive   D# = Delete permanently   Q = Back"
         __cm_blank
-        local cmd; read -rp "  >: " cmd
+        local cmd; printf '  >: '; read -r cmd
         if [[ -z "$cmd" || "$cmd" == "q" || "$cmd" == "Q" ]]; then return; fi
         if [[ "$cmd" =~ ^[uU]([0-9]+)$ ]]; then
             local idx=$((${BASH_REMATCH[1]} - 1))
@@ -544,7 +549,7 @@ __cm_do_view_archived() {
             if (( idx >= 0 && idx < ${#archived[@]} )); then
                 __cm_say_c "$__CM_C_RED" "This permanently deletes the conversation file and all associated data."
                 __cm_say_c "$__CM_C_RED" "This cannot be undone."
-                local confirm; read -rp "  Type 'delete' to confirm: " confirm
+                local confirm; printf "  Type 'delete' to confirm: "; read -r confirm
                 if [[ "${confirm,,}" == "delete" ]]; then
                     local entry="${archived[idx]}"
                     local g d desc t; IFS='|' read -r g d desc t <<< "$entry"
@@ -582,14 +587,14 @@ __cm_do_edit_list() {
         __cm_blank
         __cm_say "R# = Rename   P# = Path   A# = Archive   D# = Delete   M#,# = Move   Q = Done"
         __cm_blank
-        local cmd; read -rp "  >: " cmd
+        local cmd; printf '  >: '; read -r cmd
         [[ -z "$cmd" || "$cmd" == "q" || "$cmd" == "Q" ]] && return
         local count=${#sessions[@]}
         if [[ "$cmd" =~ ^[rR]([0-9]+)$ ]]; then
             local idx=$((${BASH_REMATCH[1]} - 1))
             if (( idx >= 0 && idx < count )); then
                 local g d desc t; IFS='|' read -r g d desc t <<< "${sessions[idx]}"
-                local new_name; read -rp "  New name for '$desc': " new_name
+                local new_name; printf "  New name for '$desc': "; read -r new_name
                 if [[ -n "$new_name" ]]; then
                     sessions[idx]="$g|$d|$new_name|$t"
                     __cm_save_sessions "${sessions[@]}"
@@ -601,7 +606,7 @@ __cm_do_edit_list() {
             if (( idx >= 0 && idx < count )); then
                 local g d desc t; IFS='|' read -r g d desc t <<< "${sessions[idx]}"
                 __cm_say "Current: $d"
-                local new_path; read -rp "  New path (Enter to keep): " new_path
+                local new_path; printf '  New path (Enter to keep): '; read -r new_path
                 if [[ -n "$new_path" ]]; then
                     if [[ ! -d "$new_path" ]]; then __cm_say "Path does not exist: $new_path"; continue; fi
                     local old_key new_key old_proj new_proj
@@ -643,7 +648,7 @@ __cm_do_edit_list() {
             if (( idx >= 0 && idx < count )); then
                 __cm_say_c "$__CM_C_RED" "This permanently deletes the conversation file and all associated data."
                 __cm_say_c "$__CM_C_RED" "This cannot be undone."
-                local confirm; read -rp "  Type 'delete' to confirm: " confirm
+                local confirm; printf "  Type 'delete' to confirm: "; read -r confirm
                 if [[ "${confirm,,}" == "delete" ]]; then
                     local entry="${sessions[idx]}"
                     local g d desc t; IFS='|' read -r g d desc t <<< "$entry"
@@ -769,7 +774,7 @@ __cm_resolve_resume_or_recover() {
     __cm_say "  2. Create a recovery-prompt.md file in the project directory, that you can prompt Claude to read and execute, with optional edits."
     __cm_say "  3. Cancel"
     __cm_blank
-    local choice; read -rp "  > " choice
+    local choice; printf '  > '; read -r choice
     case "$choice" in
         1) __cm_recover_action="fresh"; return ;;
         3|"") __cm_recover_action="cancel"; return ;;
@@ -964,7 +969,7 @@ __cm_do_refresh() {
         if [[ "$g" == "$current_guid" ]]; then cur_desc="$desc"; cur_dir="$d"; break; fi
     done
     __cm_blank
-    local new_name; read -rp "  Name for new session (Enter for '$cur_desc'): " new_name
+    local new_name; printf "  Name for new session (Enter for '$cur_desc'): "; read -r new_name
     [[ -z "$new_name" ]] && new_name="$cur_desc"
     # Skeleton extraction setup.
     local proj_key proj_dir_claude old_jsonl
@@ -1043,7 +1048,7 @@ TAIL
             printf '\n\n--- ADD YOUR NOTES HERE (context, decisions, corrections, anything the skeleton missed) ---\n\n\n\n--- SKELETON START (review and edit as needed) ---\n\n%s\n\n--- SKELETON END ---\n' "$skeleton_content"
         fi
     } > "$prompt_file"
-    local edit_ans; read -rp "  Would you like to view/edit the compaction prompt and skeleton before proceeding? (Save and close when done) [y/N]: " edit_ans
+    local edit_ans; printf '  Would you like to view/edit the compaction prompt and skeleton before proceeding? (Save and close when done) [y/N]: '; read -r edit_ans
     if [[ "$edit_ans" == "y" || "$edit_ans" == "Y" ]]; then
         "${EDITOR:-nano}" "$prompt_file"
     fi
@@ -1165,7 +1170,7 @@ __cm_do_post_exit() {
         spin_pid=$!
         "$cmv_exe" snapshot "$snap_label" -s "$guid" >/dev/null 2>&1
         kill "$spin_pid" 2>/dev/null; wait "$spin_pid" 2>/dev/null
-        printf '  Done.                        \n'
+        printf '\r  Done.                        \n'
     fi
     # Locate entry; update tokens or register new.
     local sessions=() s
@@ -1194,7 +1199,7 @@ __cm_do_post_exit() {
         # Title case (POSIX sh-friendly-ish)
         folder=$(printf '%s' "$folder" | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')
         local desc
-        read -rp "  Describe this session (Enter for '$folder', 'skip' to skip): " desc
+        printf "  Describe this session (Enter for '$folder', 'skip' to skip): "; read -r desc
         [[ "$desc" == "skip" ]] && return
         [[ -z "$desc" ]] && desc="$folder"
         local new_entry="$guid|$(pwd)|$desc|"
@@ -1218,14 +1223,14 @@ __cm_do_post_exit() {
         __cm_blank
         __cm_say "Current session: $__cm_info_size ($__cm_info_tokens)"
     fi
-    __cm_blank
-    local do_trim; read -rp "  Trim this session? [y/N]: " do_trim
+    echo ""
+    local do_trim; printf '  Trim this session? [y/N]: '; read -r do_trim
     if [[ "$do_trim" == "y" || "$do_trim" == "Y" ]]; then
         __cm_do_trim "$guid"
         [[ -n "$__cm_trim_new_guid" ]] && guid="$__cm_trim_new_guid"
     fi
-    __cm_blank
-    local do_refresh; read -rp "  Create a new compacted session, built from a structured rebuild of this one? [y/N]: " do_refresh
+    echo ""
+    local do_refresh; printf '  Create a new compacted session, built from a structured rebuild of this one? [y/N]: '; read -r do_refresh
     if [[ "$do_refresh" == "y" || "$do_refresh" == "Y" ]]; then
         __cm_do_refresh "$guid"
     fi
@@ -1291,7 +1296,7 @@ __cm_invoke_resume_with_fork_detection() {
         [[ -n "$bn" ]] && before_newest=$(basename "$bn" .jsonl)
     fi
     local claude_exe; claude_exe=$(__cm_resolve_claude) || return 1
-    "$claude_exe" --dangerously-skip-permissions --resume "$original_guid" -n "$display_name"
+    "$claude_exe" --dangerously-skip-permissions --resume "$original_guid"
     __cm_resume_exit=$?
     if (( __cm_resume_exit == 0 )) && [[ -d "$pd" ]]; then
         local newest; newest=$(ls -1t "$pd"/*.jsonl 2>/dev/null | head -1)
@@ -1362,7 +1367,7 @@ __cm_do_resume() {
             [[ -n "$bn" ]] && before_newest=$(basename "$bn" .jsonl)
         fi
         local claude_exe; claude_exe=$(__cm_resolve_claude)
-        "$claude_exe" --dangerously-skip-permissions -n "$display_name"
+        "$claude_exe" --dangerously-skip-permissions
         if (( $? == 0 )); then
             local newest; newest=$(ls -1t "$pd"/*.jsonl 2>/dev/null | head -1)
             if [[ -n "$newest" ]]; then
@@ -1402,7 +1407,7 @@ __cm_do_resume() {
             __cm_say "The session entry has NOT been deleted. You can try again later or investigate the JSONL."
         else
             __cm_blank
-            local ans; read -rp "  Session JSONL is missing. Delete this entry? [Y/n]: " ans
+            local ans; printf '  Session JSONL is missing. Delete this entry? [Y/n]: '; read -r ans
             if [[ "$ans" != "n" && "$ans" != "N" ]]; then
                 local ses=() s new=()
                 mapfile -t ses < <(__cm_get_sessions)
@@ -1431,7 +1436,7 @@ claudecm() {
     # Machine name.
     if [[ ! -f "$__cm_machine_name_file" ]]; then
         __cm_blank
-        local mn; read -rp "  Machine name for remote display (e.g. desktop, laptop): " mn
+        local mn; printf '  Machine name for remote display (e.g. desktop, laptop): '; read -r mn
         if [[ -z "$mn" ]]; then
             mn=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
             [[ -z "$mn" ]] && mn="unknown"
@@ -1455,14 +1460,14 @@ claudecm() {
             fi
             __cm_show_list 0
             __cm_blank
-            local pick; read -rp "  Pick a session (Enter to quit): " pick
+            local pick; printf '  Pick a session (Enter to quit): '; read -r pick
             [[ -z "$pick" ]] && return
             if [[ "$pick" == "e" || "$pick" == "E" ]]; then __cm_do_edit_list; continue; fi
             if [[ "$pick" == "v" || "$pick" == "V" ]]; then __cm_do_view_archived; continue; fi
             if [[ "$pick" == "m" || "$pick" == "M" ]]; then
                 __cm_blank
                 __cm_say "Current machine name: $__cm_machine_name"
-                local nm; read -rp "  New name (Enter to keep): " nm
+                local nm; printf '  New name (Enter to keep): '; read -r nm
                 if [[ -n "$nm" ]]; then
                     printf '%s\n' "$nm" > "$__cm_machine_name_file"
                     __cm_machine_name="$nm"
@@ -1487,7 +1492,7 @@ claudecm() {
             local orig; orig=$(pwd)
             cd "$new_proj"
             local display_name="$__cm_machine_name - $pick"
-            __cm_invoke_claude_launch "$new_proj" -- --dangerously-skip-permissions -n "$display_name"
+            __cm_invoke_claude_launch "$new_proj" -- --dangerously-skip-permissions
             if [[ -n "$__cm_launch_sid" ]]; then
                 local sessions=()
                 mapfile -t sessions < <(__cm_get_sessions)
@@ -1545,7 +1550,7 @@ claudecm() {
             fi
             __cm_blank
             __cm_say "Session found: $mdesc"
-            local rename_ans; read -rp "  Rename? (Enter to keep): " rename_ans
+            local rename_ans; printf '  Rename? (Enter to keep): '; read -r rename_ans
             if [[ -n "$rename_ans" ]]; then
                 local new=() ss
                 for ss in "${sessions[@]}"; do
@@ -1555,7 +1560,7 @@ claudecm() {
                 done
                 __cm_save_sessions "${new[@]}"
             fi
-            local use_ans; read -rp "  Resume this session? [Y/n]: " use_ans
+            local use_ans; printf '  Resume this session? [Y/n]: '; read -r use_ans
             if [[ "$use_ans" != "n" && "$use_ans" != "N" ]]; then
                 if [[ ! -d "$md" ]]; then __cm_say "Error: Project directory not found: $md"; return; fi
                 cd "$md"
@@ -1610,7 +1615,7 @@ claudecm() {
                         __cm_say "The session entry has NOT been deleted."
                     else
                         __cm_blank
-                        local del; read -rp "  Session JSONL is missing. Delete this entry? [Y/n]: " del
+                        local del; printf '  Session JSONL is missing. Delete this entry? [Y/n]: '; read -r del
                         if [[ "$del" != "n" && "$del" != "N" ]]; then
                             local ses=() ns new=()
                             mapfile -t ses < <(__cm_get_sessions)
@@ -1632,7 +1637,7 @@ claudecm() {
             local fd; fd=$(basename "$(pwd)")
             fd="${fd//-/ }"
             fd=$(printf '%s' "$fd" | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')
-            read -rp "  Create a name for this session (Enter for '$fd', 'skip' to skip): " pre_named
+            printf "  Create a name for this session (Enter for '$fd', 'skip' to skip): "; read -r pre_named
             if [[ "$pre_named" == "skip" ]]; then pre_named=""
             elif [[ -z "$pre_named" ]]; then pre_named="$fd"; fi
         fi
@@ -1643,7 +1648,7 @@ claudecm() {
     elif [[ -n "$match" ]]; then local _g _d _dd _t; IFS='|' read -r _g _d _dd _t <<< "$match"; launch_desc="$_dd"
     else launch_desc=$(basename "$(pwd)"); fi
     local display_name="$__cm_machine_name - $launch_desc"
-    __cm_invoke_claude_launch "$cur_dir" -- --dangerously-skip-permissions -n "$display_name" "${pass_args[@]}"
+    __cm_invoke_claude_launch "$cur_dir" -- --dangerously-skip-permissions "${pass_args[@]}"
     if (( __cm_launch_exit != 0 )); then
         [[ -n "$proj_dir" ]] && cd "$orig"
         return
@@ -1663,4 +1668,9 @@ claudecm() {
     fi
     [[ -n "$proj_dir" ]] && cd "$orig"
 }
+
+# When executed directly (not sourced), run the function
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    claudecm "$@"
+fi
 
