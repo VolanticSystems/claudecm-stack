@@ -624,16 +624,16 @@ If skeleton present, append:
 ```
 
 6. Write to `<cmDir>/refresh-prompt.tmp`.
-7. Prompt: `  Edit the compaction prompt and skeleton? (Save and close when done) [y/N]: `. If `y`, open in editor (notepad on Windows, $EDITOR/nano on Linux), wait for editor to close.
+7. Prompt: `  Would you like to view/edit the compaction prompt and skeleton before proceeding? (Save and close when done) [y/N]: `. If `y`, open in editor (notepad on Windows, $EDITOR/nano on Linux), wait for editor to close.
 8. Read the (possibly edited) prompt, delete temp file.
 9. `cd` to session directory.
 10. Print `  Creating fresh session, please wait...`
-11. Run `claude --dangerously-skip-permissions -p <prompt-text>`. Discard output. (Headless one-shot; not subject to the launch-path mechanics in Section 11.6.)
+11. Pipe the prompt text to claude via **stdin**, not as a command-line argument. Command shape: `<prompt-text> | claude --dangerously-skip-permissions -p --output-format json`. Capture stdout. **IMPORTANT — do not pass the prompt as `-p <prompt-text>`:** Windows' CreateProcess command-line length limit (~32,767 chars) is exceeded by any realistic compaction prompt that includes a skeleton and filtered transcript. Passing as an argument fails silently on Windows with `"The filename or extension is too long"`, produces no output, and breaks the whole refresh flow. Stdin has no length limit. This was discovered on 2026-04-14 after a full day of debugging a different hypothesis.
 12. Print `  Done.`
 13. Restore directory.
-14. Find the new session GUID: newest JSONL under project key directory whose basename ≠ old GUID. If none, print warning and return.
+14. Find the new session GUID: **parse `session_id` from the captured JSON stdout of step 11**. Never scan the project directory for "newest JSONL" — that approach races against other concurrent sessions writing to the same project dir, and the wrong file gets picked (see `private/how my lazy ass created a bunch of race conditions, and how I plan to unfuckit.md` for the full cautionary tale). If the JSON parse fails or has no `session_id`, print a warning and return; do NOT fall back to filesystem scanning.
 15. Build new sessions list:
-    - Identify the old entry. Compute new DESC: append ` (old)` if not already old, or bump `(old N)` → `(old N+1)`.
+    - Identify the old entry. Compute new DESC by stripping any trailing ` (old)` or ` (old N)` suffix to get a base description, then scanning the sessions list for all entries with the same base description AND the same Dir (excluding the session being renamed itself). Collect every `(old N)` number already in use (treat bare `(old)` as N=1). Assign the next unused positive integer: if N=1 is free, the new DESC is `<base> (old)`; otherwise `<base> (old <next>)`. This prevents duplicate `(old)` labels that arise when repeated refreshes on the same project pick the same increment each time.
     - All other sessions stay in place (relative order).
     - Get token count for new session: `cmv benchmark -s <freshGuid> --json`, parse `preTrimTokens`. Never `--latest`.
     - Build new entry: `{Guid=<new>, Dir=<curDir>, Desc=<newName>, Tokens=<tokens>}`.

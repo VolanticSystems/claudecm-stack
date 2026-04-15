@@ -798,6 +798,7 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
                         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
                     }
             }
+            Sync-SessionIndex $entry.Dir
         }
         Write-Host ""
         Write-Host "  Session trimmed. New ID: $newGuid"
@@ -900,7 +901,7 @@ IMPORTANT:
         }
         $promptFile = Join-Path $cmDir "refresh-prompt.tmp"
         $refreshPrompt | Set-Content $promptFile -Encoding UTF8
-        $editPrompt = Read-Host "  Edit the compaction prompt and skeleton? (Save and close when done) [y/N]"
+        $editPrompt = Read-Host "  Would you like to view/edit the compaction prompt and skeleton before proceeding? (Save and close when done) [y/N]"
         if ($editPrompt -eq 'y') {
             $proc = Start-Process notepad $promptFile -PassThru
             $proc.WaitForExit()
@@ -912,17 +913,15 @@ IMPORTANT:
         Set-Location $curDir
         Write-Host ""
         Write-Host "  Creating fresh session, please wait..."
-        & $claudeExe --dangerously-skip-permissions -p $promptText 2>&1 | Out-Null
+        $refreshJson = $promptText | & $claudeExe --dangerously-skip-permissions -p --output-format json 2>&1 | Out-String
         Write-Host "  Done."
         Set-Location $refreshOrigDir
-        # Capture new session GUID (must be different from the one we refreshed)
-        $projKey = Get-ProjectKey $curDir
-        $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
+        # Capture new session GUID authoritatively from the JSON output (no filesystem guessing).
         $freshGuid = $null
-        $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
-            Where-Object { $_.BaseName -ne $currentGuid } |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($newest) { $freshGuid = $newest.BaseName }
+        try {
+            $parsed = $refreshJson | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.session_id) { $freshGuid = $parsed.session_id }
+        } catch {}
         if (-not $freshGuid) {
             Write-Host "  Warning: Refresh did not create a new session. The old session is unchanged." -ForegroundColor Yellow
             return
@@ -933,11 +932,22 @@ IMPORTANT:
         $others = @()
         foreach ($s in $sessions) {
             if ($s.Guid -eq $currentGuid) {
-                if ($s.Desc -match '\(old(?:\s+(\d+))?\)$') {
-                    $num = if ($Matches[1]) { [int]$Matches[1] + 1 } else { 2 }
-                    $oldDesc = $s.Desc -replace '\(old(?:\s+\d+)?\)$', "(old $num)"
+                $baseDesc = $s.Desc -replace '\s*\(old(?:\s+\d+)?\)\s*$', ''
+                $usedNums = @()
+                foreach ($other in $sessions) {
+                    if ($other.Guid -eq $currentGuid) { continue }
+                    if ($other.Dir -ne $s.Dir) { continue }
+                    $pat = '^' + [regex]::Escape($baseDesc) + '\s*\(old(?:\s+(\d+))?\)\s*$'
+                    if ($other.Desc -match $pat) {
+                        if ($Matches[1]) { $usedNums += [int]$Matches[1] } else { $usedNums += 1 }
+                    }
+                }
+                if ($usedNums.Count -eq 0) {
+                    $oldDesc = "$baseDesc (old)"
                 } else {
-                    $oldDesc = "$($s.Desc) (old)"
+                    $n = 1
+                    while ($usedNums -contains $n) { $n++ }
+                    if ($n -eq 1) { $oldDesc = "$baseDesc (old)" } else { $oldDesc = "$baseDesc (old $n)" }
                 }
                 $oldEntry = [PSCustomObject]@{ Guid=$s.Guid; Dir=$s.Dir; Desc=$oldDesc; Tokens=$s.Tokens }
             } else {
@@ -951,6 +961,7 @@ IMPORTANT:
             $tokMatch = [regex]::Match($benchOut, '"preTrimTokens"\s*:\s*(\d+)')
             if ($tokMatch.Success) { $freshTokens = $tokMatch.Groups[1].Value }
         }
+        Sync-SessionIndex $curDir
         $freshEntry = [PSCustomObject]@{ Guid=$freshGuid; Dir=$curDir; Desc=$newName; Tokens=$freshTokens }
         $newSessions = @($freshEntry) + @($others)
         if ($oldEntry) { $newSessions += $oldEntry }
