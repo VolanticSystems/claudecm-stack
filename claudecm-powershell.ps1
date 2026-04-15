@@ -1064,6 +1064,20 @@ IMPORTANT:
         }
     }
 
+    function Test-CleanExitTail($jsonlPath) {
+        # Returns $true if the tail of the JSONL shows a clean /exit (trailing
+        # user "/exit" command). Claude Code's resume refuses these because the
+        # last exchange has no assistant response, which its tail-scan treats as
+        # an interrupted state.
+        try {
+            $tail = Get-Content $jsonlPath -Tail 10 -ErrorAction Stop
+            foreach ($line in $tail) {
+                if ($line -match '/exit</command-name>') { return $true }
+            }
+        } catch {}
+        return $false
+    }
+
     function Invoke-ResumeWithForkDetection($originalGuid, $projectDir, $displayName) {
         # Claude Code can fork a resumed session to a new JSONL (version upgrades across resumes,
         # deferred-tool recovery, etc). When that happens, the live file's basename differs from
@@ -1071,6 +1085,7 @@ IMPORTANT:
         # the predecessor doesn't become an orphan on next launch.
         $projKey = Get-ProjectKey $projectDir
         $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
+        $predJsonl = Join-Path $projDirClaude "$originalGuid.jsonl"
         $beforeNewest = $null
         if (Test-Path $projDirClaude) {
             $beforeNewest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
@@ -1079,6 +1094,21 @@ IMPORTANT:
         & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName
         $exitCode = $LASTEXITCODE
         $effectiveGuid = $originalGuid
+        # Retry-with-prompt recovery. Claude Code's --resume scans the JSONL tail
+        # for a completed exchange. A session that exited via /exit has a trailing
+        # user command with no assistant response; Claude treats this as an
+        # interrupted state and refuses. Offer the user a one-shot retry with an
+        # initial prompt so Claude has something fresh to respond to.
+        if ($exitCode -ne 0 -and (Test-Path $predJsonl) -and (Test-CleanExitTail $predJsonl)) {
+            Write-Host ""
+            Write-Host "  Claude refused to resume. This is a known quirk after a clean /exit."
+            Write-Host "  The conversation is intact; Claude just needs an initial prompt to pick up."
+            $retryAns = Read-Host "  Would you like to retry with a prompt that says `"please continue`"? [Y/n]"
+            if ($retryAns -ne 'n' -and $retryAns -ne 'N') {
+                & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName "please continue"
+                $exitCode = $LASTEXITCODE
+            }
+        }
         if ($exitCode -eq 0 -and (Test-Path $projDirClaude)) {
             $newest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
