@@ -416,6 +416,7 @@ Steps:
 1. Compute `projDirClaude` from `projectDir` via `Get-ProjectKey`.
 2. Pre-snapshot the newest JSONL in `projDirClaude` (call it `beforeNewest`). May be null.
 3. Launch claude (Section 11.6) with `--resume <originalGuid> -n <displayName>`. Capture exit code.
+3a. **Clean-exit retry.** If exit code is non-zero AND `<originalGuid>.jsonl` exists on disk AND its tail shows a trailing `/exit` user command (grep the last ~10 lines for `/exit</command-name>`), this is a known Claude Code quirk: Claude's resume scans the JSONL tail for a completed exchange and refuses when the last entry is a user command with no assistant response. Offer recovery. Print two explanatory lines, then prompt `  Would you like to retry with a prompt that says "please continue"? [Y/n]:` (default Y). On Y, re-launch with an appended `"please continue"` positional argument and update the captured exit code. On N, fall through with the original non-zero exit code and let the caller show its usual refused-resume message. Do this BEFORE the fork-detect block in step 4 so fork detection also sees the effects of a successful retry.
 4. If exit code is 0 and `projDirClaude` exists:
    - Re-scan for the newest JSONL.
    - If the newest differs from `originalGuid` AND (no pre-snapshot existed OR its basename differs from `beforeNewest.BaseName`), treat this as a fork:
