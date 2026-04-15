@@ -336,17 +336,17 @@ Inputs: `scan_dir`, `registered_guid`. Returns either `{ Action='select', Guid=<
 
 The two implementations launch `claude` differently. Same observable behavior, different mechanisms because the platforms have different constraints. This asymmetry is intentional.
 
-#### PowerShell: direct positional invocation at every call site
+#### PowerShell: direct positional invocation wrapped in two helpers
 
-Each call site builds the args inline and calls `claude` directly:
+Each call site uses one of two helpers (Section 11.6.1 for resumes, Section 11.6.2 for fresh launches). Both helpers ultimately call `claude` with direct positional arguments:
 
 ```
 & $claudeExe --dangerously-skip-permissions [--resume <guid>] -n $displayName [@passArgs]
 ```
 
-No helper function. No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `desktop - My Project` get mangled, with the bare `-` between "desktop" and "My" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
+No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `desktop - My Project` get mangled, with the bare `-` between "desktop" and "My" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
 
-After a successful launch, the caller infers the new session ID from the project key directory's JSONL state (snapshot diff or "newest in project key"). For resume-by-known-GUID launches, the caller already knows the GUID and uses it directly.
+After a successful launch, the helper infers the new session ID from the project key directory's JSONL state via set-diff snapshot (see 11.6.2). For resume-by-known-GUID launches, the helper starts with the passed GUID and detects forks via set-diff (see 11.6.1).
 
 #### Bash: `invoke_claude_launch` helper with belt-and-suspenders
 
@@ -428,6 +428,29 @@ Steps:
 5. Return `{ ExitCode, EffectiveGuid }`. Caller runs Do-PostExit on the effective guid.
 
 **Single-source rule:** every `--resume` call in the codebase routes through this helper. Bare `claude --resume ...` calls followed by `Do-PostExit <original-guid>` are forbidden — they are the exact shape that produces fork-orphans.
+
+### 11.6.2 Fresh launch with set-diff detection
+
+Inputs: `projectDir`, `displayName`, `passArgs` (array). Returns: `{ ExitCode, NewGuid }`.
+
+A wrapper around the Section 11.6 launch path, used for every fresh (non-resume) interactive launch. It detects the new session's GUID via set-diff instead of "newest-by-mtime" to survive concurrent writers racing in the same project key directory.
+
+Steps:
+
+1. Compute `projDirClaude` from `projectDir` via `Get-ProjectKey`.
+2. Build `beforeSet` = set of UUID-basename JSONLs currently in `projDirClaude`. Filter basenames against `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`.
+3. Launch claude (Section 11.6) with `-n <displayName>` plus any `passArgs`. Capture exit code.
+4. If exit code is 0 and `projDirClaude` exists:
+   - List UUID-basename JSONLs again.
+   - Compute `newFiles` = those NOT present in `beforeSet`.
+   - If 1 element, return its basename as `NewGuid`.
+   - If >1 elements, return the newest-by-mtime as `NewGuid` (residual heuristic case; occurs only when two fresh launches race in the same project key dir within one ClaudeCM invocation).
+   - If 0 elements, `NewGuid` stays null (user exited at splash, launch aborted, etc).
+5. Return `{ ExitCode, NewGuid }`. Caller decides how to register in sessions.txt.
+
+**Why set-diff, not "newest-by-mtime":** a concurrent writer in another window can touch an existing JSONL mid-launch, making it appear newer than the file our launch created. "Newest by mtime" picks the wrong one. Set-diff picks only files that did not exist before the launch, so concurrent writers that merely touch existing files are invisible to it. This is race site #4/#5/#6 in `private/how my lazy ass created a bunch of race conditions, and how I plan to unfuckit.md`, validated in `private/meta-prompt-playground/race-4-5-6-sandbox/`.
+
+**Single-source rule:** every fresh (non-resume) interactive launch routes through this helper. Bare `claude -n <name>` calls followed by "newest-in-project-key" inference are forbidden — they are the exact shape that mis-registers the wrong session during concurrent writes.
 
 ### 11.7 Resolve-ResumeOrRecover (recovery primer flow)
 
