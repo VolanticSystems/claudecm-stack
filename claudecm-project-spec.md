@@ -371,6 +371,29 @@ Inside the helper:
 
 Both paths achieve the same goal: launch claude, get back the session ID it ended up using, never confuse it with a session in a different project. The PowerShell path achieves it without a helper because the launch is direct and the project-scoped inference is sufficient. The bash path uses a helper because bash can safely splat arrays AND can capture a child PID for the manifest cross-check, both of which are wins. Forcing one mechanism on both platforms loses something on whichever platform doesn't fit.
 
+### 11.6.1 Resume with fork detection
+
+Inputs: `originalGuid`, `projectDir`, `displayName`. Returns: `{ ExitCode, EffectiveGuid }`.
+
+A thin wrapper around the Section 11.6 launch path, used for every `--resume` invocation. It exists because Claude Code can fork a resumed session into a new JSONL file under several conditions observed in the wild (version upgrades between resumes, deferred-tool recovery, state transitions). When that happens, the post-resume "live" file is not the one we asked to resume — the old file is effectively abandoned, and if we treat it as still current, we orphan the new file and misreport tokens against the dead one.
+
+Steps:
+
+1. Compute `projDirClaude` from `projectDir` via `Get-ProjectKey`.
+2. Pre-snapshot the newest JSONL in `projDirClaude` (call it `beforeNewest`). May be null.
+3. Launch claude (Section 11.6) with `--resume <originalGuid> -n <displayName>`. Capture exit code.
+4. If exit code is 0 and `projDirClaude` exists:
+   - Re-scan for the newest JSONL.
+   - If the newest differs from `originalGuid` AND (no pre-snapshot existed OR its basename differs from `beforeNewest.BaseName`), treat this as a fork:
+     - Load sessions.txt.
+     - Find the entry whose guid equals `originalGuid`. If found, swap its guid to the newest basename and reset tokens to empty. Save.
+     - Set `effectiveGuid` to the newest basename.
+     - Quarantine the predecessor: move `<originalGuid>.jsonl` (and its sidecar dir if present) from `projDirClaude` into `<backupDir>/<projectLeaf>/`. Then call `Sync-SessionIndex` on `projectDir`. The predecessor is wholly subsumed by the fork (Claude Code copies its history forward), so leaving it on disk would only produce a spurious orphan warning on the next launch.
+   - Otherwise `effectiveGuid` stays equal to `originalGuid`.
+5. Return `{ ExitCode, EffectiveGuid }`. Caller runs Do-PostExit on the effective guid.
+
+**Single-source rule:** every `--resume` call in the codebase routes through this helper. Bare `claude --resume ...` calls followed by `Do-PostExit <original-guid>` are forbidden — they are the exact shape that produces fork-orphans.
+
 ### 11.7 Resolve-ResumeOrRecover (recovery primer flow)
 
 Inputs: `guid`, `dir`, `desc`, `tokens`. Returns: `{ Action='normal'|'fresh'|'primed'|'cancel', Guid=<guid or null> }`.
@@ -475,20 +498,22 @@ Inputs: `pick`, `sessions`.
 2. Save original location, `cd` to `sel.Dir`.
 3. Run Do-OrphanScan. If user selected an orphan to resume:
    - Display name = `<machine> - <sel.Desc>`
-   - Launch via the platform's launch path (Section 11.6) with `--resume <orphan-guid>`.
-   - On exit code 0, Do-PostExit with the orphan-guid we asked for.
+   - Launch via the resume-with-fork-detection helper (Section 11.6.1) with `--resume <orphan-guid>`.
+   - On exit code 0, Do-PostExit with the EFFECTIVE guid returned by the helper.
    - Restore directory, return.
 4. Run Resolve-ResumeOrRecover:
    - cancel → restore, return
    - fresh → launch via Section 11.6 (no `--resume`). On successful launch with new SessionId, swap the dead entry's GUID for the new one in place (preserving desc and dir, resetting tokens). Then Do-PostExit. **Critical:** do NOT delete the dead entry before launching — if launch fails, the entry would be unrecoverable.
-   - primed → launch with `--resume <recover.Guid>`, Do-PostExit
-   - normal → launch with `--resume <sel.Guid>`, Do-PostExit
-5. If the normal-resume launch exits non-zero (session not found):
-   - Prompt: `  Session not found. Delete this entry? [Y/n]: ` (default Y)
-   - If not `n`, remove the entry from sessions.txt.
+   - primed → launch via resume-with-fork-detection (11.6.1) with `--resume <recover.Guid>`, Do-PostExit with effective guid.
+   - normal → launch via resume-with-fork-detection (11.6.1) with `--resume <sel.Guid>`, Do-PostExit with effective guid.
+5. If the normal-resume launch exits non-zero, distinguish by whether the target JSONL is on disk:
+   - JSONL exists but Claude refused to load it: print a yellow note that the most common causes are an interrupted tool call or stale deferred-tool marker, and that the entry has NOT been deleted. Do not prompt.
+   - JSONL is missing from disk: prompt `  Session JSONL is missing. Delete this entry? [Y/n]: ` (default Y). If not `n`, remove the entry from sessions.txt.
 6. Restore directory.
 
 **Critical:** the recovery `fresh` branch must NOT delete the old sessions.txt entry before launching. If the launch fails (Claude crashes, arg passing breaks, anything), the entry would be gone with no JSONL to fall back to. Instead, launch first; if the launch succeeds and produces a new SessionId, swap the old GUID for the new one in place (preserving desc and dir, resetting tokens). If the launch fails, the entry stays put and the user can retry.
+
+**Critical:** every `--resume` invocation must go through the resume-with-fork-detection helper (Section 11.6.1). Claude Code can fork a resumed session to a new JSONL file (version upgrades across a resume, deferred-tool recovery, etc.), and the live file's basename then differs from the GUID we asked to resume. Calling `--resume <guid>` directly and then running Do-PostExit on the original guid leaves the new file orphaned — it is the real session going forward, but sessions.txt still points at the pre-fork file that Claude has abandoned.
 
 ### 11.10 Do-EditList
 
