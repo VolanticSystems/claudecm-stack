@@ -990,7 +990,7 @@ IMPORTANT:
         # Auto-snapshot with CMV (now that we have a guid, use -s instead of --latest).
         # Failure of the snapshot job is non-fatal: Do-PostExit's main purpose is
         # to update token counts and offer trim/refresh; snapshot is nice-to-have.
-        # If the job crashes or times out, log at dark-gray and continue.
+        # If the job crashes or times out, log it and continue.
         if (Test-Path $cmvExe) {
             try {
                 $snapLabel = "auto-exit-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -1012,13 +1012,13 @@ IMPORTANT:
                     $i++
                 }
                 if ($job.State -eq 'Failed') {
-                    Write-Host "`r  Snapshot job failed; continuing.                  "
+                    Write-Host "`r  Snapshot job failed (non-fatal).        "
                 } elseif ($job.State -eq 'Completed') {
                     Write-Host "`r  Done.                        "
                 }
                 Remove-Job $job -Force -ErrorAction SilentlyContinue
             } catch {
-                Write-Host "  Snapshot job threw: $_. Continuing."
+                Write-Host "  Snapshot setup error (non-fatal): $($_.Exception.Message)"
             }
         }
         $sessions = Get-Sessions
@@ -1074,11 +1074,10 @@ IMPORTANT:
 
     function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs) {
         # Fresh launch (no --resume) with set-diff detection of the new session's GUID.
-        # Returns @{ ExitCode; NewGuid }. NewGuid is $null if launch produced no new
-        # UUID JSONL (user exited at splash, launch failed, etc).
+        # Sets $script:lastFreshExit and $script:lastFreshNewGuid. Same output-capture-safe
+        # pattern as Invoke-ResumeWithForkDetection: NO return value, callers read script vars.
         # Immune to concurrent writers that touch or create other JSONLs mid-launch
-        # EXCEPT when two fresh launches race in the exact same project-key dir
-        # within one ClaudeCM invocation (see race-conditions doc, residual case).
+        # except when two fresh launches race in the same project-key dir within one invocation.
         $projKey = Get-ProjectKey $projectDir
         $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
         $uuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -1104,7 +1103,8 @@ IMPORTANT:
                 $newGuid = ($newFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1).BaseName
             }
         }
-        return @{ ExitCode = $exitCode; NewGuid = $newGuid }
+        $script:lastFreshExit = $exitCode
+        $script:lastFreshNewGuid = $newGuid
     }
 
     function Test-CleanExitTail($jsonlPath) {
@@ -1134,6 +1134,8 @@ IMPORTANT:
             $beforeNewest = Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
         }
+        Write-Host ""
+        Write-Host ""
         & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName
         $exitCode = $LASTEXITCODE
         $effectiveGuid = $originalGuid
@@ -1174,7 +1176,8 @@ IMPORTANT:
                 }
             }
         }
-        return @{ ExitCode = $exitCode; EffectiveGuid = $effectiveGuid }
+        $script:lastResumeExit = $exitCode
+        $script:lastResumeGuid = $effectiveGuid
     }
 
     function Do-Resume($pick, $sessions) {
@@ -1192,8 +1195,8 @@ IMPORTANT:
         $scanResult = Do-OrphanScan $sel.Dir $sel.Guid
         if ($scanResult -and $scanResult.Action -eq 'select') {
             $displayName = Get-SessionDisplayName $sel.Desc
-            $r = Invoke-ResumeWithForkDetection $scanResult.Guid $sel.Dir $displayName
-            if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
+            Invoke-ResumeWithForkDetection $scanResult.Guid $sel.Dir $displayName
+            if ($script:lastResumeExit -eq 0) { Do-PostExit $script:lastResumeGuid }
             Set-Location $origDir
             return
         }
@@ -1203,28 +1206,28 @@ IMPORTANT:
         if ($recover.Action -eq 'fresh') {
             # Do NOT delete the old entry before launch. After a successful launch,
             # detect the new session via set-diff snapshot (Invoke-FreshLaunchWithDetection).
-            $r = Invoke-FreshLaunchWithDetection $sel.Dir $displayName @()
-            if ($r.ExitCode -eq 0 -and $r.NewGuid) {
+            Invoke-FreshLaunchWithDetection $sel.Dir $displayName @()
+            if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
                 # Swap GUID in place, preserve desc and dir, reset tokens.
                 $sessions = Get-Sessions
                 foreach ($s in $sessions) {
-                    if ($s.Guid -eq $sel.Guid) { $s.Guid = $r.NewGuid; $s.Tokens = '' }
+                    if ($s.Guid -eq $sel.Guid) { $s.Guid = $script:lastFreshNewGuid; $s.Tokens = '' }
                 }
                 Save-Sessions $sessions
-                Do-PostExit $r.NewGuid
+                Do-PostExit $script:lastFreshNewGuid
             }
             Set-Location $origDir
             return
         }
         if ($recover.Action -eq 'primed') {
-            $r = Invoke-ResumeWithForkDetection $recover.Guid $sel.Dir $displayName
-            if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
+            Invoke-ResumeWithForkDetection $recover.Guid $sel.Dir $displayName
+            if ($script:lastResumeExit -eq 0) { Do-PostExit $script:lastResumeGuid }
             Set-Location $origDir
             return
         }
-        $r = Invoke-ResumeWithForkDetection $sel.Guid $sel.Dir $displayName
-        if ($r.ExitCode -eq 0) {
-            Do-PostExit $r.EffectiveGuid
+        Invoke-ResumeWithForkDetection $sel.Guid $sel.Dir $displayName
+        if ($script:lastResumeExit -eq 0) {
+            Do-PostExit $script:lastResumeGuid
         } else {
             # Distinguish "JSONL is actually missing" from "Claude refused to resume but the file is there"
             $projKey = Get-ProjectKey $sel.Dir
@@ -1303,10 +1306,10 @@ IMPORTANT:
             $origDir = Get-Location
             Set-Location $newProjDir
             $displayName = Get-SessionDisplayName $pick
-            $r = Invoke-FreshLaunchWithDetection $newProjDir $displayName @()
-            if ($r.ExitCode -eq 0 -and $r.NewGuid) {
+            Invoke-FreshLaunchWithDetection $newProjDir $displayName @()
+            if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
                 $sessions = Get-Sessions
-                $newEntry = [PSCustomObject]@{ Guid=$r.NewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
+                $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
                 $sessions = @($newEntry) + @($sessions)
                 Save-Sessions $sessions
             }
@@ -1366,8 +1369,8 @@ IMPORTANT:
                 }
                 Set-Location $match.Dir
                 $displayName = Get-SessionDisplayName $match.Desc
-                $r = Invoke-ResumeWithForkDetection $scanResult.Guid $match.Dir $displayName
-                if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
+                Invoke-ResumeWithForkDetection $scanResult.Guid $match.Dir $displayName
+                if ($script:lastResumeExit -eq 0) { Do-PostExit $script:lastResumeGuid }
                 if ($projDir) { Set-Location $origDir }
                 return
             }
@@ -1391,27 +1394,27 @@ IMPORTANT:
                 $displayName = Get-SessionDisplayName $match.Desc
                 if ($recover.Action -eq 'fresh') {
                     # Do NOT delete the old entry before launch. Detect new GUID via set-diff snapshot.
-                    $r = Invoke-FreshLaunchWithDetection $match.Dir $displayName @()
-                    if ($r.ExitCode -eq 0 -and $r.NewGuid) {
+                    Invoke-FreshLaunchWithDetection $match.Dir $displayName @()
+                    if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
                         $sessions = Get-Sessions
                         foreach ($s in $sessions) {
-                            if ($s.Guid -eq $match.Guid) { $s.Guid = $r.NewGuid; $s.Tokens = '' }
+                            if ($s.Guid -eq $match.Guid) { $s.Guid = $script:lastFreshNewGuid; $s.Tokens = '' }
                         }
                         Save-Sessions $sessions
-                        Do-PostExit $r.NewGuid
+                        Do-PostExit $script:lastFreshNewGuid
                     }
                     if ($projDir) { Set-Location $origDir }
                     return
                 }
                 if ($recover.Action -eq 'primed') {
-                    $r = Invoke-ResumeWithForkDetection $recover.Guid $match.Dir $displayName
-                    if ($r.ExitCode -eq 0) { Do-PostExit $r.EffectiveGuid }
+                    Invoke-ResumeWithForkDetection $recover.Guid $match.Dir $displayName
+                    if ($script:lastResumeExit -eq 0) { Do-PostExit $script:lastResumeGuid }
                     if ($projDir) { Set-Location $origDir }
                     return
                 }
-                $r = Invoke-ResumeWithForkDetection $match.Guid $match.Dir $displayName
-                if ($r.ExitCode -eq 0) {
-                    Do-PostExit $r.EffectiveGuid
+                Invoke-ResumeWithForkDetection $match.Guid $match.Dir $displayName
+                if ($script:lastResumeExit -eq 0) {
+                    Do-PostExit $script:lastResumeGuid
                 } else {
                     $projKey = Get-ProjectKey $match.Dir
                     $jsonlPath = "$env:USERPROFILE\.claude\projects\$projKey\$($match.Guid).jsonl"
@@ -1446,23 +1449,23 @@ IMPORTANT:
 
     $launchDesc = if ($preNamed) { $preNamed } elseif ($match) { $match.Desc } else { (Split-Path (Get-Location).Path -Leaf) }
     $displayName = Get-SessionDisplayName $launchDesc
-    $r = Invoke-FreshLaunchWithDetection $curDir $displayName $passArgs
-    if ($r.ExitCode -ne 0) {
+    Invoke-FreshLaunchWithDetection $curDir $displayName $passArgs
+    if ($script:lastFreshExit -ne 0) {
         if ($projDir) { Set-Location $origDir }
         return
     }
 
     if ($preNamed) {
         # Session was pre-named before launch; register it then run post-exit.
-        if ($r.NewGuid) {
+        if ($script:lastFreshNewGuid) {
             $sessions = Get-Sessions
-            $newEntry = [PSCustomObject]@{ Guid=$r.NewGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
+            $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
             $sessions = @($newEntry) + @($sessions)
             Save-Sessions $sessions
-            Do-PostExit $r.NewGuid
+            Do-PostExit $script:lastFreshNewGuid
         }
-    } elseif ($r.NewGuid) {
-        Do-PostExit $r.NewGuid
+    } elseif ($script:lastFreshNewGuid) {
+        Do-PostExit $script:lastFreshNewGuid
     }
 
     if ($projDir) { Set-Location $origDir }
