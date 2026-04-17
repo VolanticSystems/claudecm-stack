@@ -630,8 +630,9 @@ Does NOT touch `sessions.txt`. Caller is responsible for removing the entry.
 8. **If file isn't there but exists in another project key, FAIL LOUDLY.** Print red error showing expected vs actual path. Tell the user to investigate. **Do NOT silently copy across project directories.** This was the source of the April 2026 cross-project contamination.
 9. Print remaining output lines (first 10, excluding Session ID line).
 10. **Post-trim cleanup.** Scan for `*.cmv-trim-tmp` files in the project key dir whose mtime >= `trimStartedAt`. Delete each (CMV failed to clean up after itself), print `  CMV left a temp file behind: <name>; removing.` in dark gray.
-11. Print `  Session trimmed. New ID: <new-guid>`.
-12. Set `script:trimNewGuid = <new-guid>` so the caller can use it.
+11. **Quarantine the pre-trim file.** CMV trim creates a NEW session with a new GUID, leaving the original JSONL on disk unreferenced. Move `<currentGuid>.jsonl` (and its sidecar `<currentGuid>/` subdir if present) to `~/.claudecm/backup/<project-leaf>/`. This prevents the pre-trim file from becoming an orphan. (Omitting this step was the source of the April 16, 2026 orphan accumulation.)
+12. Print `  Session trimmed. New ID: <new-guid>`.
+13. Set `script:trimNewGuid = <new-guid>` so the caller can use it.
 
 ### 11.14 Do-Refresh
 
