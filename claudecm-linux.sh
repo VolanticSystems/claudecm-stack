@@ -950,6 +950,16 @@ __cm_do_trim() {
         fi
         __cm_sync_session_index "$d"
     fi
+    local leaf; leaf=$(basename "$d")
+    local backup_sub="$HOME/.claudecm/backup/$leaf"
+    mkdir -p "$backup_sub" 2>/dev/null
+    local pre_trim_file="$pd/$current_guid.jsonl"
+    if [[ -f "$pre_trim_file" ]]; then
+        mv -f "$pre_trim_file" "$backup_sub/$current_guid.jsonl" 2>/dev/null
+        if [[ -d "$pd/$current_guid" ]]; then
+            mv -f "$pd/$current_guid" "$backup_sub/$current_guid" 2>/dev/null
+        fi
+    fi
     __cm_blank
     __cm_say "Session trimmed. New ID: $new_guid"
     __cm_trim_new_guid="$new_guid"

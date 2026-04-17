@@ -799,6 +799,14 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
                     }
             }
             Sync-SessionIndex $entry.Dir
+            $preTrimFile = Join-Path "$env:USERPROFILE\.claude\projects\$(Get-ProjectKey $entry.Dir)" "$currentGuid.jsonl"
+            if (Test-Path $preTrimFile) {
+                $destSubdir = Join-Path $backupDir (Split-Path $entry.Dir -Leaf)
+                if (-not (Test-Path $destSubdir)) { New-Item -ItemType Directory -Path $destSubdir -Force | Out-Null }
+                Move-Item $preTrimFile (Join-Path $destSubdir "$currentGuid.jsonl") -Force -ErrorAction SilentlyContinue
+                $preTrimSidecar = Join-Path "$env:USERPROFILE\.claude\projects\$(Get-ProjectKey $entry.Dir)" $currentGuid
+                if (Test-Path $preTrimSidecar) { Move-Item $preTrimSidecar (Join-Path $destSubdir $currentGuid) -Force -ErrorAction SilentlyContinue }
+            }
         }
         Write-Host ""
         Write-Host "  Session trimmed. New ID: $newGuid"
