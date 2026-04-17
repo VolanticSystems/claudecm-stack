@@ -1301,10 +1301,11 @@ IMPORTANT:
             }
             # Non-numeric, non-E: treat as new project title
             $safeDirName = $pick.ToLower() -replace '\s+', '-' -replace '[^a-z0-9_-]', ''
-            $newProjDir = Join-Path (Get-Location).Path $safeDirName
+            $projBase = "$env:USERPROFILE\Documents\GitHub"
+            $newProjDir = Join-Path $projBase $safeDirName
             $counter = 1
             while (Test-Path $newProjDir) {
-                $newProjDir = Join-Path (Get-Location).Path "$safeDirName($counter)"
+                $newProjDir = Join-Path $projBase "$safeDirName($counter)"
                 $counter++
             }
             New-Item -ItemType Directory -Path $newProjDir -Force | Out-Null
