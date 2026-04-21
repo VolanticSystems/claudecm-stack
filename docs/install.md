@@ -28,17 +28,31 @@ Bun is a JavaScript runtime (like Node.js) that Claude-Mem uses for one reason: 
 
 ### Windows (PowerShell)
 
-1. Open your PowerShell profile:
+The script lives in `~/.claudecm/` and is dot-sourced from your PowerShell profile. This keeps one canonical copy and makes updates trivial (replace the file, no profile edits).
+
+1. Create the ClaudeCM directory and copy the script:
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.claudecm" | Out-Null
+   Copy-Item .\claudecm-powershell.ps1 "$env:USERPROFILE\.claudecm\claudecm-powershell.ps1"
+   Copy-Item .\extract-skeleton.mjs    "$env:USERPROFILE\.claudecm\extract-skeleton.mjs"
+   ```
+
+2. Open your PowerShell profile:
    ```powershell
    notepad $PROFILE
    ```
    If the file doesn't exist, PowerShell will ask to create it. Say yes.
 
-2. Paste the entire contents of `claudecm-powershell.ps1` into your profile.
+3. Add this single line to your profile:
+   ```powershell
+   . "$env:USERPROFILE\.claudecm\claudecm-powershell.ps1"
+   ```
 
-3. Save and open a new PowerShell window. The old window won't see the changes.
+4. Save and open a new PowerShell window. The old window won't see the changes.
 
-4. Type `claudecm` to launch Claude Code with session management.
+5. Type `claudecm` to launch Claude Code with session management.
+
+**To update later:** replace `~/.claudecm/claudecm-powershell.ps1` with a newer version from the repo. The profile line stays untouched.
 
 ### Linux
 
