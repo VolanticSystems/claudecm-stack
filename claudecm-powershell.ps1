@@ -76,7 +76,7 @@ function claudecm {
             if ($line.Trim() -eq '[archived]') { break }
             $sessions += Parse-SessionLine $line
         }
-        return $sessions
+        return ,$sessions
     }
 
     function Get-ArchivedSessions {
@@ -87,7 +87,7 @@ function claudecm {
             if ($line.Trim() -eq '[archived]') { $inArchived = $true; continue }
             if ($inArchived) { $sessions += Parse-SessionLine $line }
         }
-        return $sessions
+        return ,$sessions
     }
 
     function Acquire-SessionsLock {
