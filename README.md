@@ -212,7 +212,7 @@ The combination means your session list in Claude Context Manager isn't just a l
 
 Everything described here is open source and runs locally:
 
-- **ClaudeCM** --- Session manager. PowerShell or bash. Paste into your shell profile.
+- **ClaudeCM** --- Session manager. PowerShell or bash. Installed to `~/.claudecm/` and dot-sourced from your shell profile.
 
 - **Context-Manager** --- Compaction checkpoint hooks + dedup tracking. Node.js MCP server + bash hooks.
 
