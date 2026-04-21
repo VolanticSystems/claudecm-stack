@@ -827,6 +827,28 @@ The following known races are documented and left unfixed because the mitigation
 
 ---
 
+### 14.3 Critical PowerShell pattern: functions that build and return arrays must preserve the array wrapper
+
+**This rule exists because violating it caused the session list to silently display zero entries on a fresh install (2026-04-21).**
+
+**The trap.** PowerShell automatically unwraps single-element arrays when they are returned from a function. If `Get-Sessions` builds `$sessions = @()`, appends one `PSCustomObject`, and returns it with `return $sessions`, the caller receives a bare `PSCustomObject`, not a one-element array. Properties like `.Count` behave differently on a scalar than on an array (in PS 5.1, `.Count` on a `PSCustomObject` returns `$null`), and `for ($i = 0; $i -lt $sessions.Count; ...)` silently evaluates `0 -lt $null` as `$false`, skipping the loop body entirely.
+
+**The symptom.** A user with exactly one saved session runs `claudecm l`. The header and footer render, but no sessions appear between them. The list looks empty. There is no error message. The session data is on disk and correctly formatted. The problem is invisible unless you know to check `.GetType()` on the return value.
+
+**The fix.** Every function that returns an `@()` array MUST use the comma operator to preserve the array wrapper:
+
+```powershell
+return ,$sessions
+```
+
+The unary `,` wraps the value in a one-element array before PowerShell's pipeline unwrap strips one layer, leaving the original array intact. This applies to `Get-Sessions` and `Get-ArchivedSessions`.
+
+**Why this only surfaces on fresh installs.** Most development and testing happens with multiple sessions already registered. With two or more entries, PowerShell's unwrap produces a multi-element array, which behaves identically to a proper `@()` array. The bug only fires when there is exactly one entry, which is the state every new user hits on their first session.
+
+**Bash equivalence.** Bash does not have this problem. Bash arrays do not auto-unwrap on return; functions communicate arrays via globals or nameref, and a one-element array is still an array.
+
+---
+
 ## 15. Script-scoped state
 
 PowerShell-style script-scoped variables used to communicate between functions:
