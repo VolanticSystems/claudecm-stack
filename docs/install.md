@@ -54,6 +54,12 @@ The script lives in `~/.claudecm/` and is dot-sourced from your PowerShell profi
 
 **To update later:** replace `~/.claudecm/claudecm-powershell.ps1` with a newer version from the repo. The profile line stays untouched.
 
+**Optional: silence Claude Code's suggested-prompt hints.** Claude Code shows follow-up prompt suggestions in the command line. To turn them off, uncomment this line near the top of `claudecm-powershell.ps1` (it ships commented out):
+```powershell
+$env:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "0"
+```
+This is a personal preference, off by default. Re-apply it after updating the script, since updates overwrite the file.
+
 ### Linux
 
 1. Create a dedicated `claude` user (if you don't already have one):
