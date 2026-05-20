@@ -1439,6 +1439,9 @@ __cm_do_resume() {
 claudecm() {
     # Bootstrap
     export CLAUDE_CODE_REMOTE_SEND_KEEPALIVES=1
+    # Optional personal preference: uncomment to disable Claude Code's CLI
+    # suggested-prompt hints (the "do you want to..." follow-ups). See README.
+    # export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0
     mkdir -p "$__cm_cm_dir" "$__cm_backup_dir" 2>/dev/null
     [[ -f "$__cm_sessions_file" ]] || : > "$__cm_sessions_file"
     __cm_ensure_cleanup_period_days
