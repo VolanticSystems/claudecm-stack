@@ -5,6 +5,9 @@ function claudecm {
     $claudeExe = "$env:USERPROFILE\.local\bin\claude.exe"
     $cmvExe = "$env:APPDATA\npm\cmv.cmd"
     $env:CLAUDE_CODE_REMOTE_SEND_KEEPALIVES = "1"
+    # Optional personal preference: uncomment to disable Claude Code's CLI
+    # suggested-prompt hints (the "do you want to..." follow-ups). See README.
+    # $env:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "0"
 
     function Ensure-CleanupPeriodDays {
         $settingsPath = "$env:USERPROFILE\.claude\settings.json"
