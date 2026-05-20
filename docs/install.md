@@ -78,6 +78,8 @@ This is a personal preference, off by default. Re-apply it after updating the sc
 
 4. Type `claudecm` to launch Claude Code with session management.
 
+**Optional (same as Windows):** to silence Claude Code's suggested-prompt hints, uncomment `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0` near the top of the `claudecm()` function. Off by default; re-apply after updating the script.
+
 ## Step 2: Context-Manager (Layer 1, Compaction Insurance)
 
 ```bash
