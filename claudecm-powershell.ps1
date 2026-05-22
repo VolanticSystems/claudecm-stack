@@ -482,14 +482,14 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
             }
         }
         Write-Host ""
-        $archivedCount = @(Get-ArchivedSessions).Count
+        $archivedCount = (Get-ArchivedSessions).Count
         Write-Host "  E. Edit this list"
         if ($archivedCount -gt 0) { Write-Host "  V. View archived ($archivedCount)" }
         Write-Host "  M. Machine name ($machineName)"
     }
 
     function Do-OrphanScan($scanDir, $registeredGuid) {
-        $sessions = @(Get-Sessions) + @(Get-ArchivedSessions)
+        $sessions = (Get-Sessions) + (Get-ArchivedSessions)
         $projKey = Get-ProjectKey $scanDir
         $projDirClaude = "$env:USERPROFILE\.claude\projects\$projKey"
         $allJsonl = @()
@@ -503,7 +503,7 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
             $guid = $f.BaseName
             $sessMatch = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
             if (-not $sessMatch) { $hasProblems = $true; break }
-            if ($sessMatch.Dir -ne $scanDir) { $hasProblems = $true; break }
+            if ("$($sessMatch.Dir)".TrimEnd('\','/') -ne "$scanDir".TrimEnd('\','/')) { $hasProblems = $true; break }
         }
         if (-not $hasProblems) { return $null }
         $backupDir = "$env:USERPROFILE\documents\github\claude-conversation-backup"

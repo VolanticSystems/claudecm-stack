@@ -847,6 +847,8 @@ The unary `,` wraps the value in a one-element array before PowerShell's pipelin
 
 **Bash equivalence.** Bash does not have this problem. Bash arrays do not auto-unwrap on return; functions communicate arrays via globals or nameref, and a one-element array is still an array.
 
+**The counterpart trap: never re-wrap a comma-returned array in `@()` (2026-05-22).** Because `return ,$sessions` emits the array as a single non-enumerated pipeline item, wrapping the call in `@()` does NOT flatten it; it produces a one-element array whose sole member is the inner array. So `@(Get-Sessions) + @(Get-ArchivedSessions)` yields a 2-element jagged array, not a combined list. Iterating it makes every `$_` a whole sub-array: `.Guid` returns an array, `-eq` coerces to a filter, and `.Dir` returns every directory concatenated. This silently broke `Do-OrphanScan` (it saw `sessions.Count = 2` and fired the "multiple conversation files" picker for any project with 2+ JSONLs), and `@(Get-ArchivedSessions).Count` always returned 1. **Rule: consume these functions with direct assignment or bare parentheses** (`$x = Get-Sessions`, `(Get-Sessions) + (Get-ArchivedSessions)`, `(Get-ArchivedSessions).Count`), never `@(...)`. Note the asymmetry: the comma operator is required on return AND forbidden to re-wrap on consume.
+
 ---
 
 ## 15. Script-scoped state
