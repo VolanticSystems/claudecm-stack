@@ -254,7 +254,7 @@ The function takes positional arguments via `$args` / `$@`.
 
 ### 11.1 List mode
 
-Triggered when first arg is `l`, `L`, `-l`, or `-L`.
+Triggered when there is no first arg (bare `claudecm`) OR the first arg is `l`, `L`, `-l`, or `-L`. Bare invocation defaults to list mode because that is by far the most common entry point; an explicit `n` (Section 11.3) is required to start a fresh session in the current directory.
 
 Loop:
 1. Read sessions. If empty, print `  No saved sessions.` and return.
@@ -282,7 +282,10 @@ Triggered when first arg matches `^\d+$` (and is not list mode).
 
 ### 11.3 Argument parsing for normal mode
 
+Normal mode is reached when the first arg is not list mode (Section 11.1) and not a number (Section 11.2). Most commonly this is an explicit `n` or `N` ("new session in cwd"), but it also handles flag pass-through to `claude` (e.g. `claudecm -p "..."`).
+
 Walk `$args`:
+- If the first arg is `n` or `N`, consume it (it is the explicit "new" verb and is not passed to `claude`).
 - `--proj <dir>` consumes two args, sets `projDir`.
 - Anything else accumulates into `passArgs[]` (passed through to `claude` on launch).
 
