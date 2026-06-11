@@ -1265,8 +1265,8 @@ IMPORTANT:
     # --- Main ---
     $firstArg = $args[0]
 
-    # List mode
-    if ($firstArg -eq 'l' -or $firstArg -eq 'L' -or $firstArg -eq '-l' -or $firstArg -eq '-L') {
+    # List mode (also default when invoked with no args)
+    if (-not $firstArg -or $firstArg -eq 'l' -or $firstArg -eq 'L' -or $firstArg -eq '-l' -or $firstArg -eq '-L') {
         while ($true) {
             $sessions = Get-Sessions
             if ($sessions.Count -eq 0) {
@@ -1343,10 +1343,12 @@ IMPORTANT:
         return
     }
 
-    # Normal mode
+    # Normal mode (fresh launch in cwd, or pass-through to claude)
     $projDir = $null
     $passArgs = @()
     $i = 0
+    # Strip leading 'n'/'N' if present (explicit "new" verb, mirrors old bare-claudecm behavior)
+    if ($args.Count -gt 0 -and ($args[0] -eq 'n' -or $args[0] -eq 'N')) { $i = 1 }
     while ($i -lt $args.Count) {
         if ($args[$i] -eq '--proj' -and ($i + 1) -lt $args.Count) {
             $projDir = $args[$i + 1]
