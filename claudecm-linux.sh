@@ -1464,7 +1464,7 @@ claudecm() {
 
     local first="${1:-}"
     # List mode
-    if [[ "$first" == "l" || "$first" == "L" || "$first" == "-l" || "$first" == "-L" ]]; then
+    if [[ -z "$first" || "$first" == "l" || "$first" == "L" || "$first" == "-l" || "$first" == "-L" ]]; then
         while true; do
             local sessions=()
             mapfile -t sessions < <(__cm_get_sessions)
