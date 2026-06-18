@@ -1105,7 +1105,13 @@ IMPORTANT:
         }
         $exitCode = $LASTEXITCODE
         $newGuid = $null
-        if ($exitCode -eq 0 -and (Test-Path $projDirClaude)) {
+        # Detection must run regardless of exit code. The JSONL is written at session
+        # start (within ~1s of launch), so it exists by the time we reach this block
+        # whether claude exited cleanly (/exit), was Ctrl-C'd, was window-closed, or
+        # crashed. Gating detection on $exitCode -eq 0 caused new sessions to silently
+        # vanish from sessions.txt whenever the user exited any way other than /exit
+        # (spec 14.4).
+        if (Test-Path $projDirClaude) {
             $newFiles = @(Get-ChildItem "$projDirClaude\*.jsonl" -ErrorAction SilentlyContinue |
                 Where-Object { $_.BaseName -match $uuidPattern -and -not $before.ContainsKey($_.BaseName) })
             if ($newFiles.Count -eq 1) {
@@ -1319,7 +1325,8 @@ IMPORTANT:
             Set-Location $newProjDir
             $displayName = Get-SessionDisplayName $pick
             Invoke-FreshLaunchWithDetection $newProjDir $displayName @()
-            if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
+            # Register on detected GUID alone, not exit code. See spec 14.4.
+            if ($script:lastFreshNewGuid) {
                 $sessions = Get-Sessions
                 $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
                 $sessions = @($newEntry) + @($sessions)
@@ -1409,7 +1416,8 @@ IMPORTANT:
                 if ($recover.Action -eq 'fresh') {
                     # Do NOT delete the old entry before launch. Detect new GUID via set-diff snapshot.
                     Invoke-FreshLaunchWithDetection $match.Dir $displayName @()
-                    if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
+                    # Register on detected GUID alone, not exit code. See spec 14.4.
+                    if ($script:lastFreshNewGuid) {
                         $sessions = Get-Sessions
                         foreach ($s in $sessions) {
                             if ($s.Guid -eq $match.Guid) { $s.Guid = $script:lastFreshNewGuid; $s.Tokens = '' }
