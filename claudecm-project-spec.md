@@ -852,6 +852,22 @@ The unary `,` wraps the value in a one-element array before PowerShell's pipelin
 
 **The counterpart trap: never re-wrap a comma-returned array in `@()` (2026-05-22).** Because `return ,$sessions` emits the array as a single non-enumerated pipeline item, wrapping the call in `@()` does NOT flatten it; it produces a one-element array whose sole member is the inner array. So `@(Get-Sessions) + @(Get-ArchivedSessions)` yields a 2-element jagged array, not a combined list. Iterating it makes every `$_` a whole sub-array: `.Guid` returns an array, `-eq` coerces to a filter, and `.Dir` returns every directory concatenated. This silently broke `Do-OrphanScan` (it saw `sessions.Count = 2` and fired the "multiple conversation files" picker for any project with 2+ JSONLs), and `@(Get-ArchivedSessions).Count` always returned 1. **Rule: consume these functions with direct assignment or bare parentheses** (`$x = Get-Sessions`, `(Get-Sessions) + (Get-ArchivedSessions)`, `(Get-ArchivedSessions).Count`), never `@(...)`. Note the asymmetry: the comma operator is required on return AND forbidden to re-wrap on consume.
 
+### 14.4 Critical pattern: new-session registration MUST NOT depend on claude's exit code
+
+**This rule exists because violating it caused new sessions to silently vanish from `sessions.txt` whenever the user exited any way other than `/exit` (2026-06-17).**
+
+**The trap.** `Invoke-FreshLaunchWithDetection` snapshots the project-key JSONL directory before launch, runs claude synchronously, and after exit performs a set-diff to identify the new GUID. Gating that set-diff on `$LASTEXITCODE -eq 0` is wrong. The JSONL is created at session start (within ~1 second of launch); its existence is independent of how the session terminates. Whether claude exits via `/exit` (code 0), Ctrl-C (non-zero), window close (non-zero), or crash (non-zero), the GUID is real and the session is real. Gating detection on exit code throws away a real session every time the user closes their terminal without typing `/exit`.
+
+**The symptom.** User runs `claudecm n`, chats with claude for any length of time, then closes the window instead of typing `/exit`. Claude returns non-zero. The JSONL exists with hundreds of KB of conversation under a valid GUID. `sessions.txt` is never updated. Next time the user runs `claudecm`, the session is invisible. There is no error message.
+
+**The fix.** Detection at line 1108 must run on `Test-Path $projDirClaude` alone, with no exit-code check. Callers must register on `$script:lastFreshNewGuid` alone, with no `$script:lastFreshExit -eq 0` check. Both gates have to drop together; dropping only the outer caller gate is insufficient because the inner gate prevents detection from producing a GUID in the first place.
+
+**Why this is safe.** The set-diff identifies "GUIDs present after launch that were not present before launch." This is correct regardless of exit code. A claude that exits before writing any JSONL produces no diff and registers nothing. A claude that exits before any user message still wrote its session-metadata header at startup, and registering an empty session is correct (the user can resume or delete it).
+
+**Bash equivalence.** Bash already does the right thing. `__cm_invoke_claude_launch` (line ~1261) detects the GUID via `comm -13` unconditionally; bash callers gate registration on `[[ -n "$__cm_launch_sid" ]]`, never on exit code. This bug existed only in PowerShell because the PowerShell implementation drifted from the spec.
+
+**Why this only surfaces some of the time.** Most development testing involves typing `/exit` cleanly. The bug is invisible in that path. It only fires when a user closes the terminal window, hits Ctrl-C, or has claude crash. These are common in real use, rare in scripted testing.
+
 ---
 
 ## 15. Script-scoped state
