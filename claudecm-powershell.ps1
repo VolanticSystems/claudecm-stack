@@ -208,12 +208,14 @@ function claudecm {
                         $firstPrompt = $sessMatch.Desc
                         $projPath = $sessMatch.Dir
                     }
+                    $msgCount = 0
+                    try { $msgCount = @(Get-Content $f.FullName).Count } catch {}
                     $newEntries += @{
                         sessionId = $guid
                         fullPath = $f.FullName
                         fileMtime = $mtime
                         firstPrompt = $firstPrompt
-                        messageCount = 0
+                        messageCount = $msgCount
                         created = $created
                         modified = $modified
                         gitBranch = ""
@@ -1083,7 +1085,7 @@ IMPORTANT:
         }
     }
 
-    function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs) {
+    function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs, $rawDesc) {
         # Fresh launch (no --resume) with set-diff detection of the new session's GUID.
         # Sets $script:lastFreshExit and $script:lastFreshNewGuid. Same output-capture-safe
         # pattern as Invoke-ResumeWithForkDetection: NO return value, callers read script vars.
@@ -1098,6 +1100,25 @@ IMPORTANT:
                 Where-Object { $_.BaseName -match $uuidPattern } |
                 ForEach-Object { $before[$_.BaseName] = $true }
         }
+        # Only for genuinely-new sessions (rawDesc supplied): fire a detached background
+        # process that waits, then registers the session if it crashed before exiting.
+        # This process is fully independent of this console; it survives if this shell dies.
+        try {
+            $lateHelper = "$cmDir\register-late-guid.ps1"
+            if ($rawDesc -and (Test-Path $lateHelper)) {
+                # -ArgumentList rejects any empty-string element, so BeforeGuids is
+                # only appended when non-empty (brand-new dirs have no 'before' set).
+                # Values are wrapped in escaped quotes: Start-Process -ArgumentList does
+                # not auto-quote array elements, so any value containing a space (session
+                # names, or project dirs like NinjaTrader's) would otherwise be split apart.
+                $spArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$lateHelper`"",
+                    '-ProjDirClaude', "`"$projDirClaude`"", '-ProjectDir', "`"$projectDir`"",
+                    '-Desc', "`"$rawDesc`"", '-SessionsFile', "`"$sessionsFile`"")
+                $beforeArg = ($before.Keys -join ',')
+                if ($beforeArg) { $spArgs += @('-BeforeGuids', "`"$beforeArg`"") }
+                Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $spArgs | Out-Null
+            }
+        } catch {}
         if ($passArgs -and $passArgs.Count -gt 0) {
             & $claudeExe --dangerously-skip-permissions -n $displayName @passArgs
         } else {
@@ -1122,6 +1143,11 @@ IMPORTANT:
         }
         $script:lastFreshExit = $exitCode
         $script:lastFreshNewGuid = $newGuid
+        $script:lastFreshAlreadyRegistered = $false
+        if ($newGuid) {
+            $already = Get-Sessions | Where-Object { $_.Guid -eq $newGuid }
+            if ($already) { $script:lastFreshAlreadyRegistered = $true }
+        }
     }
 
     function Test-CleanExitTail($jsonlPath) {
@@ -1197,6 +1223,15 @@ IMPORTANT:
         $script:lastResumeGuid = $effectiveGuid
     }
 
+    function Move-SessionToTop($guid) {
+        $cur = Get-Sessions
+        $match = $cur | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
+        if (-not $match) { return }
+        $rest = $cur | Where-Object { $_.Guid -ne $guid }
+        $new = @($match) + @($rest)
+        Save-Sessions $new
+    }
+
     function Do-Resume($pick, $sessions) {
         if ($pick -lt 1 -or $pick -gt $sessions.Count) {
             Write-Host "  Invalid selection."
@@ -1207,6 +1242,7 @@ IMPORTANT:
             Write-Host "  Error: Project directory not found: $($sel.Dir)"
             return
         }
+        Move-SessionToTop $sel.Guid
         $origDir = Get-Location
         Set-Location $sel.Dir
         $scanResult = Do-OrphanScan $sel.Dir $sel.Guid
@@ -1223,7 +1259,7 @@ IMPORTANT:
         if ($recover.Action -eq 'fresh') {
             # Do NOT delete the old entry before launch. After a successful launch,
             # detect the new session via set-diff snapshot (Invoke-FreshLaunchWithDetection).
-            Invoke-FreshLaunchWithDetection $sel.Dir $displayName @()
+            Invoke-FreshLaunchWithDetection $sel.Dir $displayName @() $null
             if ($script:lastFreshExit -eq 0 -and $script:lastFreshNewGuid) {
                 # Swap GUID in place, preserve desc and dir, reset tokens.
                 $sessions = Get-Sessions
@@ -1284,7 +1320,7 @@ IMPORTANT:
             Show-List $sessions
             Write-Host ""
             $pick = Read-Host "  Pick a session (Enter to quit)"
-            if (-not $pick) { return }
+            if (-not $pick -or $pick -eq 'q' -or $pick -eq 'Q') { return }
             if ($pick -eq 'e' -or $pick -eq 'E') {
                 Do-EditList
                 continue
@@ -1324,13 +1360,15 @@ IMPORTANT:
             $origDir = Get-Location
             Set-Location $newProjDir
             $displayName = Get-SessionDisplayName $pick
-            Invoke-FreshLaunchWithDetection $newProjDir $displayName @()
+            Invoke-FreshLaunchWithDetection $newProjDir $displayName @() $pick
             # Register on detected GUID alone, not exit code. See spec 14.4.
             if ($script:lastFreshNewGuid) {
-                $sessions = Get-Sessions
-                $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
-                $sessions = @($newEntry) + @($sessions)
-                Save-Sessions $sessions
+                if (-not $script:lastFreshAlreadyRegistered) {
+                    $sessions = Get-Sessions
+                    $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$newProjDir; Desc=$pick; Tokens='' }
+                    $sessions = @($newEntry) + @($sessions)
+                    Save-Sessions $sessions
+                }
             }
             Set-Location $origDir
             return
@@ -1415,7 +1453,7 @@ IMPORTANT:
                 $displayName = Get-SessionDisplayName $match.Desc
                 if ($recover.Action -eq 'fresh') {
                     # Do NOT delete the old entry before launch. Detect new GUID via set-diff snapshot.
-                    Invoke-FreshLaunchWithDetection $match.Dir $displayName @()
+                    Invoke-FreshLaunchWithDetection $match.Dir $displayName @() $null
                     # Register on detected GUID alone, not exit code. See spec 14.4.
                     if ($script:lastFreshNewGuid) {
                         $sessions = Get-Sessions
@@ -1471,7 +1509,7 @@ IMPORTANT:
 
     $launchDesc = if ($preNamed) { $preNamed } elseif ($match) { $match.Desc } else { (Split-Path (Get-Location).Path -Leaf) }
     $displayName = Get-SessionDisplayName $launchDesc
-    Invoke-FreshLaunchWithDetection $curDir $displayName $passArgs
+    Invoke-FreshLaunchWithDetection $curDir $displayName $passArgs $preNamed
     if ($script:lastFreshExit -ne 0) {
         if ($projDir) { Set-Location $origDir }
         return
@@ -1480,10 +1518,12 @@ IMPORTANT:
     if ($preNamed) {
         # Session was pre-named before launch; register it then run post-exit.
         if ($script:lastFreshNewGuid) {
-            $sessions = Get-Sessions
-            $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
-            $sessions = @($newEntry) + @($sessions)
-            Save-Sessions $sessions
+            if (-not $script:lastFreshAlreadyRegistered) {
+                $sessions = Get-Sessions
+                $newEntry = [PSCustomObject]@{ Guid=$script:lastFreshNewGuid; Dir=$curDir; Desc=$preNamed; Tokens='' }
+                $sessions = @($newEntry) + @($sessions)
+                Save-Sessions $sessions
+            }
             Do-PostExit $script:lastFreshNewGuid
         }
     } elseif ($script:lastFreshNewGuid) {
