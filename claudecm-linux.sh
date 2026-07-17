@@ -340,7 +340,7 @@ try {
       fullPath: d.full,
       fileMtime: Math.floor(d.mtime),
       firstPrompt: r.desc || '',
-      messageCount: 0,
+      messageCount: (() => { try { const b = require('fs').readFileSync(d.full); let n = 0; for (let i = 0; i < b.length; i++) { if (b[i] === 10) n++; } return n; } catch(e) { return 0; } })(),
       created: new Date(d.ctime || d.mtime).toISOString(),
       modified: new Date(d.mtime).toISOString(),
       gitBranch: '',
@@ -1259,7 +1259,9 @@ __cm_do_post_exit() {
 # foreground PID without subshell tricks that interfere with TTY handoff.
 # The spec explicitly allows Layer 1 silent fallback.
 __cm_invoke_claude_launch() {
-    __cm_launch_sid=""; __cm_launch_exit=1
+    __cm_launch_sid=""; __cm_launch_exit=1; __cm_launch_already_registered=0
+    local raw_desc=""
+    if [[ "$1" == "--raw-desc" ]]; then raw_desc="$2"; shift 2; fi
     local session_dir="$1"; shift
     [[ "$1" == "--" ]] && shift
     local claude_exe; claude_exe=$(__cm_resolve_claude) || {
@@ -1272,21 +1274,35 @@ __cm_invoke_claude_launch() {
     if [[ -d "$pd" ]]; then
         before=$(ls -1 "$pd"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | sort)
     fi
+    # Spawn crash-safe background helper for genuinely new sessions (spec 14.5).
+    if [[ -n "$raw_desc" ]]; then
+        local helper="$__cm_cm_dir/register-late-guid.sh"
+        if [[ -x "$helper" ]]; then
+            local before_csv
+            before_csv=$(printf '%s' "$before" | tr '\n' ',' | sed 's/,$//')
+            nohup bash "$helper" "$pd" "$session_dir" "$raw_desc" "$__cm_sessions_file" "$__cm_lock_file" "$before_csv" >/dev/null 2>&1 &
+            disown 2>/dev/null
+        fi
+    fi
     "$claude_exe" "$@"
     __cm_launch_exit=$?
-    # Snapshot after.
+    # Snapshot after — runs regardless of exit code (spec 14.4).
     if [[ -d "$pd" ]]; then
         local after diff sid
         after=$(ls -1 "$pd"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | sort)
         diff=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null)
-        # If there's a new UUID, that's our session id.
         sid=$(printf '%s\n' "$diff" | grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' | head -1)
         if [[ -n "$sid" ]]; then
             __cm_launch_sid="$sid"
         else
-            # Layer 3: newest in project key (may equal an existing file if no new one was made).
             local newest; newest=$(ls -1t "$pd"/*.jsonl 2>/dev/null | head -1)
             [[ -n "$newest" ]] && __cm_launch_sid=$(basename "$newest" .jsonl)
+        fi
+    fi
+    # Check if background helper already registered this GUID.
+    if [[ -n "$__cm_launch_sid" ]]; then
+        if __cm_get_sessions | grep -q "^${__cm_launch_sid}|"; then
+            __cm_launch_already_registered=1
         fi
     fi
     return 0
@@ -1342,6 +1358,23 @@ __cm_invoke_resume_with_fork_detection() {
 }
 
 # ==================================================================
+# Move-SessionToTop — bump a resumed session to position #1
+# ==================================================================
+__cm_move_session_to_top() {
+    local guid="$1"
+    local sessions=() s
+    mapfile -t sessions < <(__cm_get_sessions)
+    local match="" rest=()
+    for s in "${sessions[@]}"; do
+        local g; IFS='|' read -r g _ _ _ <<< "$s"
+        if [[ "$g" == "$guid" ]]; then match="$s"
+        else rest+=("$s"); fi
+    done
+    [[ -z "$match" ]] && return
+    __cm_save_sessions "$match" "${rest[@]}"
+}
+
+# ==================================================================
 # Do-Resume
 # ==================================================================
 __cm_do_resume() {
@@ -1357,6 +1390,7 @@ __cm_do_resume() {
     if [[ ! -d "$sel_d" ]]; then
         __cm_say "Error: Project directory not found: $sel_d"; return
     fi
+    __cm_move_session_to_top "$sel_g"
     local orig; orig=$(pwd)
     cd "$sel_d" || return
     __cm_do_orphan_scan "$sel_d" "$sel_g"
@@ -1474,7 +1508,7 @@ claudecm() {
             __cm_show_list 0
             __cm_blank
             local pick; printf '  Pick a session (Enter to quit): '; read -r pick
-            [[ -z "$pick" ]] && return
+            [[ -z "$pick" || "$pick" == "q" || "$pick" == "Q" ]] && return
             if [[ "$pick" == "e" || "$pick" == "E" ]]; then __cm_do_edit_list; continue; fi
             if [[ "$pick" == "v" || "$pick" == "V" ]]; then __cm_do_view_archived; continue; fi
             if [[ "$pick" == "m" || "$pick" == "M" ]]; then
@@ -1505,11 +1539,13 @@ claudecm() {
             local orig; orig=$(pwd)
             cd "$new_proj"
             local display_name="$__cm_machine_name - $pick"
-            __cm_invoke_claude_launch "$new_proj" -- --dangerously-skip-permissions
+            __cm_invoke_claude_launch --raw-desc "$pick" "$new_proj" -- --dangerously-skip-permissions
             if [[ -n "$__cm_launch_sid" ]]; then
-                local sessions=()
-                mapfile -t sessions < <(__cm_get_sessions)
-                __cm_save_sessions "$__cm_launch_sid|$new_proj|$pick|" "${sessions[@]}"
+                if (( ! __cm_launch_already_registered )); then
+                    local sessions=()
+                    mapfile -t sessions < <(__cm_get_sessions)
+                    __cm_save_sessions "$__cm_launch_sid|$new_proj|$pick|" "${sessions[@]}"
+                fi
                 __cm_do_post_exit "$__cm_launch_sid"
             fi
             cd "$orig"
@@ -1661,16 +1697,18 @@ claudecm() {
     elif [[ -n "$match" ]]; then local _g _d _dd _t; IFS='|' read -r _g _d _dd _t <<< "$match"; launch_desc="$_dd"
     else launch_desc=$(basename "$(pwd)"); fi
     local display_name="$__cm_machine_name - $launch_desc"
-    __cm_invoke_claude_launch "$cur_dir" -- --dangerously-skip-permissions "${pass_args[@]}"
+    __cm_invoke_claude_launch --raw-desc "$pre_named" "$cur_dir" -- --dangerously-skip-permissions "${pass_args[@]}"
     if (( __cm_launch_exit != 0 )); then
         [[ -n "$proj_dir" ]] && cd "$orig"
         return
     fi
     if [[ -n "$pre_named" ]]; then
         if [[ -n "$__cm_launch_sid" ]]; then
-            local ses=()
-            mapfile -t ses < <(__cm_get_sessions)
-            __cm_save_sessions "$__cm_launch_sid|$cur_dir|$pre_named|" "${ses[@]}"
+            if (( ! __cm_launch_already_registered )); then
+                local ses=()
+                mapfile -t ses < <(__cm_get_sessions)
+                __cm_save_sessions "$__cm_launch_sid|$cur_dir|$pre_named|" "${ses[@]}"
+            fi
             __cm_do_post_exit "$__cm_launch_sid"
         else
             __cm_do_post_exit
