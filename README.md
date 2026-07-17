@@ -6,7 +6,7 @@
 
 If you use Claude Code for varied tasks, as a lot of people do, you can quickly find yourself juggling multiple projects, with no easy way to keep track of them all. I work across data engineering, UX design, Linux sysadmin, browser automation, debugger tooling, deployment pipelines, and video processing.
 
-At any given time I\'ve got around 20 sessions at various phases of planning and development. I like to pick one up, work for a few hours or more until a milestone is reached, then park it and come back at some point, perhaps the same or next day, or maybe a lot longer than that.
+At any given time I've got around 20 sessions at various phases of planning and development. I like to pick one up, work for a few hours or more until a milestone is reached, then park it and come back at some point, perhaps the same or next day, or maybe a lot longer than that.
 
 Claude Code has two problems with this workflow. The first one hits you immediately. When you exit a session, you get this:
 
