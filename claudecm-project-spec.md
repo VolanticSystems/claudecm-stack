@@ -261,7 +261,7 @@ Loop:
 2. Show-List (no highlight).
 3. Print blank line.
 4. Prompt: `  Pick a session (Enter to quit): `
-5. Empty input → return.
+5. Empty input, OR input is `q` / `Q` → return. (Prior to 2026-07-17, only empty input quit; typing `q` fell through to step 10 and created a literal directory named `Q`. Fixed in both scripts going forward — bash must match.)
 6. `e` or `E` → Do-EditList; loop.
 7. `v` or `V` → Do-ViewArchived; loop.
 8. `m` or `M`:
@@ -556,6 +556,7 @@ If user types non-numeric, non-special input at the list mode prompt, treat it a
 Inputs: `pick`, `sessions`.
 
 1. Range-check pick. If `sel.Dir` doesn't exist, error and return.
+1a. Move-SessionToTop: move `sel.Guid`'s row to line 1 of sessions.txt (read sessions, filter target out, prepend it, write back), so recently-resumed sessions surface at the top instead of staying wherever they were. Runs before any launch attempt, unconditionally (even if the launch subsequently fails). Added 2026-07-17; bash must match.
 2. Save original location, `cd` to `sel.Dir`.
 3. Run Do-OrphanScan. If user selected an orphan to resume:
    - Display name = `<machine> - <sel.Desc>`
@@ -867,6 +868,34 @@ The unary `,` wraps the value in a one-element array before PowerShell's pipelin
 **Bash equivalence.** Bash already does the right thing. `__cm_invoke_claude_launch` (line ~1261) detects the GUID via `comm -13` unconditionally; bash callers gate registration on `[[ -n "$__cm_launch_sid" ]]`, never on exit code. This bug existed only in PowerShell because the PowerShell implementation drifted from the spec.
 
 **Why this only surfaces some of the time.** Most development testing involves typing `/exit` cleanly. The bug is invisible in that path. It only fires when a user closes the terminal window, hits Ctrl-C, or has claude crash. These are common in real use, rare in scripted testing.
+
+---
+
+### 14.5 Crash-safe registration for brand-new sessions (register-late-guid helper)
+
+**Added 2026-07-17. Bash needs an equivalent — this is new ground, not a parity fix.**
+
+**The gap this closes.** Section 14.4 fixed registration for sessions that exit non-cleanly but still ran to completion. It does not help if the *entire process* dies (BSOD, killed window, machine crash) before the user ever exits claude normally, because `Invoke-FreshLaunchWithDetection`'s set-diff only runs *after* the blocking claude launch returns. If the parent process is gone, that code never runs, and `sessions.txt` never learns the new GUID exists — even though the JSONL is sitting right there on disk with real conversation in it. This was observed for real (APLFlow, testturd) during manual testing this cycle.
+
+**The mechanism.** `register-late-guid.ps1` (new file, ships alongside `claudecm-powershell.ps1` in both the repo and `~/.claudecm/`) is a **fully detached background process**, not a job or thread inside the launching console. `Invoke-FreshLaunchWithDetection` spawns it via `Start-Process -WindowStyle Hidden` immediately before the blocking `& $claudeExe` call. Because it is a separate OS process (not `-NoNewWindow`, which would share console/TTY state), it survives even if the parent PowerShell process is killed outright.
+
+**What it does:** polls the project's Claude key directory every 30 seconds, for up to 5 minutes total, looking for a JSONL that (a) didn't exist in the pre-launch snapshot it was handed and (b) isn't yet registered anywhere in `sessions.txt`. The moment it finds a candidate, it stops polling, acquires the same `sessions.txt.lock` file lock every other write path uses, re-checks under lock whether the GUID is *already* registered (normal exit-time registration may have beaten it there), and if not, prepends a new row and writes atomically (temp file + rename). If nothing appears within 5 minutes, it exits silently — no error, no partial state.
+
+**Why 30s / 5min, not a single check.** The first version checked once at 35 seconds. Live testing showed users often sit for over a minute before typing their first message to claude — the JSONL isn't written until the first real exchange in some cases, not at bare launch. A single check missed that window entirely. The repeating-check version was chosen specifically to tolerate that.
+
+**Scope — only 2 of the 4 fresh-launch call sites trigger this.** `Invoke-FreshLaunchWithDetection` takes a 4th parameter, `rawDesc` (the human-typed session name). The background helper only fires when `rawDesc` is non-empty/non-null. It is populated at:
+  - list-mode "type a new project name" (raw title, e.g. `$pick`)
+  - the "no session entry found for this directory, name it" preNamed flow
+
+It is deliberately `$null` at the other two call sites (recovery→fresh swap-in-place, both the `sel.Guid` and cwd-match `match.Guid` variants), because those sites already have an existing `sessions.txt` row before the launch even starts — the "entry vanishes entirely" failure mode this helper exists to prevent cannot happen there even in a full crash.
+
+**Duplicate-avoidance.** If both the background helper and normal exit-time registration try to write the same GUID (race), whichever acquires the lock second sees the row already present and skips writing. Verified directly: pre-populate the target GUID in a scratch `sessions.txt`, run the helper, confirm zero writes and zero duplicates.
+
+**Windows-specific gotchas hit during implementation — bash will need its own equivalents, not these exact bugs, but the same class of care:**
+1. `Start-Process -ArgumentList` (an array) rejects any element that is an empty string. The "before" GUID set is empty for exactly the brand-new-project case (nothing existed before launch) — the single most common trigger for this whole feature — so passing an always-present-but-sometimes-empty `-BeforeGuids ''` argument broke it on the primary path. Fixed by only appending that argument when non-empty.
+2. `Start-Process -ArgumentList` does not auto-quote array elements containing spaces; a session name like "APL Flow" or a project path like `C:\Users\Bob\Documents\NinjaTrader 8\...` gets silently truncated to its first word at the child process's argv. Fixed by wrapping every free-text value in escaped double quotes before adding it to the array.
+
+**Bash porting note.** Bash's equivalent of a detached, crash-surviving background process is typically `nohup ... &` combined with `disown`, or a double-fork. Whatever mechanism is used, it must independently re-verify: (a) the spawned process truly detaches from the parent shell's process group (test by killing the parent and confirming the child keeps running), (b) argument passing preserves spaces in session names and paths (bash generally handles this correctly with proper quoting, but verify empirically rather than assuming), and (c) the lock-and-recheck-before-write sequence uses the exact same lock file (`sessions.txt.lock`) and atomic-write pattern (`__cm_write_sessions_atomic` or equivalent) the rest of the bash script already uses, so this doesn't become a second, divergent write path.
 
 ---
 
