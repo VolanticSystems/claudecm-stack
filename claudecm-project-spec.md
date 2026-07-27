@@ -270,7 +270,7 @@ Loop:
    - If non-empty, write to file, update in-memory variable, print confirmation.
    - Loop.
 9. Numeric → Do-Resume; return.
-10. Anything else → treat as new project title (Section 11.8).
+10. Anything else → treat as a candidate new project title, confirming before creation (Section 11.8). Added 2026-07-27; bash must match.
 
 ### 11.2 Direct resume by number
 
@@ -539,17 +539,18 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
 
 ### 11.8 New project from list mode
 
-If user types non-numeric, non-special input at the list mode prompt, treat it as a new project title:
+If user types non-numeric, non-special input at the list mode prompt, treat it as a candidate new project title:
 
-1. Sanitize directory name: lowercase, spaces → `-`, strip non-alphanumeric/underscore/dash chars.
-2. Choose a unique directory under cwd: `<safe_name>`, `<safe_name>(1)`, ...
-3. Create the directory.
-4. Print: blank line, `  Starting new session: <title>`, `  Project dir: <newProjDir>`.
-5. `cd` into it.
-6. Display name = `<machine> - <title>`.
-7. Launch via the platform's launch path (Section 11.6).
-8. After exit, if SessionId was resolved, register at top of sessions.txt with empty tokens, dir = newProjDir, desc = title.
-9. Restore original directory.
+1. **Confirm before creating (added 2026-07-27; bash must match).** Print a blank line, then prompt: `  '<title>' is not a session number. Create a NEW project named '<title>'? [y/N]: `. Default is No: only `y` or `yes` (case-insensitive) proceeds. Empty input or anything else prints `  Cancelled. No project created.`, a blank line, and loops back to the list. Rationale: non-numeric input previously created a project with no confirmation, so stray or speech-to-text text plus a mistyped session number (buffer such as `this. Holy fuck. 2`) silently spawned garbage-named projects and directories. The confirmation turns an accidental fall-through into a no-op (a single Enter discards it).
+2. Sanitize directory name: lowercase, spaces → `-`, strip non-alphanumeric/underscore/dash chars.
+3. Choose a unique directory under cwd: `<safe_name>`, `<safe_name>(1)`, ...
+4. Create the directory.
+5. Print: blank line, `  Starting new session: <title>`, `  Project dir: <newProjDir>`.
+6. `cd` into it.
+7. Display name = `<machine> - <title>`.
+8. Launch via the platform's launch path (Section 11.6).
+9. After exit, if SessionId was resolved, register at top of sessions.txt with empty tokens, dir = newProjDir, desc = title.
+10. Restore original directory.
 
 ### 11.9 Do-Resume
 

@@ -1344,6 +1344,16 @@ IMPORTANT:
                 Do-Resume ([int]$pick) $sessions
                 return
             }
+            # Non-numeric, non-command: this input would create a NEW project.
+            # Confirm first. Stray/STT text plus a mistyped pick lands here and
+            # would otherwise silently create a garbage-named project.
+            Write-Host ""
+            $confirmNew = Read-Host "  '$pick' is not a session number. Create a NEW project named '$pick'? [y/N]"
+            if (("$confirmNew").Trim() -notmatch '^(y|yes)$') {
+                Write-Host "  Cancelled. No project created."
+                Write-Host ""
+                continue
+            }
             # Non-numeric, non-E: treat as new project title
             $safeDirName = $pick.ToLower() -replace '\s+', '-' -replace '[^a-z0-9_-]', ''
             $projBase = "$env:USERPROFILE\Documents\GitHub"
