@@ -1525,6 +1525,18 @@ claudecm() {
             if [[ "$pick" =~ ^[0-9]+$ ]]; then
                 __cm_do_resume "$pick"; return
             fi
+            # Non-numeric, non-command: this input would create a NEW project.
+            # Confirm first. Stray/STT text plus a mistyped pick lands here and
+            # would otherwise silently create a garbage-named project.
+            __cm_blank
+            local confirm_new
+            printf "  '%s' is not a session number. Create a NEW project named '%s'? [y/N]: " "$pick" "$pick"
+            read -r confirm_new
+            if [[ "$confirm_new" != "y" && "$confirm_new" != "Y" && "$confirm_new" != "yes" && "$confirm_new" != "YES" && "$confirm_new" != "Yes" ]]; then
+                __cm_say "Cancelled. No project created."
+                __cm_blank
+                continue
+            fi
             # Non-numeric: new project title.
             local safe_name
             safe_name=$(printf '%s' "$pick" | tr '[:upper:]' '[:lower:]' | sed -E 's/[[:space:]]+/-/g; s/[^a-z0-9_-]//g')
