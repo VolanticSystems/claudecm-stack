@@ -130,9 +130,9 @@ quarantine action mutates disk and belongs in Tier 3 rather than here.
 
 ## 4. What is implemented, and what each test guards
 
-33 tests: 18 PowerShell, 15 bash. The Tier 0 to 2 tests are deliberately
-mirrored so divergence shows up as a different result on the same named test;
-Tier 3 is PowerShell only so far.
+37 tests: 20 PowerShell, 17 bash. The Tier 0 to 2 tests are deliberately
+mirrored so divergence shows up as a different result on the same named test.
+Tier 3 now exists on both platforms.
 
 **Behavioural coverage: 10 of 31 PowerShell functions, 32%.** Of the six
 functions the panel most often proposed testing, three are now covered
@@ -161,8 +161,11 @@ cheap third of the module would otherwise read as more assurance than it is.
 | new-session detection uses set-diff not newest-mtime | 11.6.2 | drop the `-not $before.ContainsKey` clause |
 | `Do-PostExit` bumps the exited session to row 1 | 5 | write the list back without reordering |
 | `Test-CleanExitTail` recognises a trailing /exit | 11.6.1 | narrow the tail pattern |
+| a launch producing no transcript adopts nothing (bash) | 11.6.2 | make `comm` treat pre-existing files as new |
+| the module never spawns powershell.exe | n/a | point Start-Process back at powershell.exe |
+| the harness supplies every enclosing-scope variable it lifts | n/a | have the product read an undefined enclosing name |
 
-**Status: 33 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0 inconclusive.**
+**Status: 37 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0 inconclusive.**
 
 The last three are Tier 2b: whole-module integration through the `claudecm`
 entry point. They exist because the `-s` dispatch lives inside `claudecm`
@@ -239,6 +242,27 @@ explicit user-initiated quarantine", and spec line 638 names
 `~/.claudecm/backup/<project-leaf>/` for the trim case. So the split may be
 deliberate. **It is not tested either way and the variable name gives no hint
 which is intended.** This wants a decision before it wants a test.
+
+## 5a. A real defect the suite found in the product
+
+**bash adopted a stranger's conversation when a launch produced nothing.**
+`__cm_invoke_claude_launch` already implemented 11.6.2 set-diff detection, but
+when the diff came back empty it fell through to
+`ls -1t "$pd"/*.jsonl | head -1` and took whatever was newest in the project key
+directory. The diff is empty precisely WHEN THE LAUNCH PRODUCED NOTHING, which
+is when the user bailed at the splash screen. In that state the newest file
+belongs to somebody else, and adopting it registers a real conversation under
+the new session's name. The spec forbids exactly this in the 11.6.2
+single-source rule and PowerShell had already removed it.
+
+Also fixed: the multi-file case took `head -1` of a sorted list, which is first
+alphabetically and unrelated to which session is ours. It now compares mtimes
+across the new set only.
+
+**And a spec contradiction.** Steps 11.6.1(4) and 11.6.2(4) both read "If exit
+code is 0 and projDirClaude exists", which contradicted 14.4 and both shipped
+implementations. Gating detection on the exit code is the exact defect that
+made new sessions vanish unless the user typed `/exit`. Both steps corrected.
 
 ## 6. Known parity gaps between the modules
 
