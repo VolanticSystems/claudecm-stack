@@ -1291,16 +1291,44 @@ __cm_invoke_claude_launch() {
     __cm_launch_exit=$?
     # Snapshot after — runs regardless of exit code (spec 14.4).
     if [[ -d "$pd" ]]; then
-        local after diff sid
+        local after diff id mt best best_mt
+        local -a new_ids=()
         after=$(ls -1 "$pd"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | sort)
         diff=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null)
-        sid=$(printf '%s\n' "$diff" | grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' | head -1)
-        if [[ -n "$sid" ]]; then
-            __cm_launch_sid="$sid"
-        else
-            local newest; newest=$(ls -1t "$pd"/*.jsonl 2>/dev/null | head -1)
-            [[ -n "$newest" ]] && __cm_launch_sid=$(basename "$newest" .jsonl)
+        while IFS= read -r id; do
+            [[ -n "$id" ]] && new_ids+=("$id")
+        done < <(printf '%s\n' "$diff" | grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+        if (( ${#new_ids[@]} == 1 )); then
+            __cm_launch_sid="${new_ids[0]}"
+        elif (( ${#new_ids[@]} > 1 )); then
+            # Residual heuristic (spec 11.6.2 step 4): two fresh launches raced
+            # in the same project key dir inside one invocation. Newest by
+            # mtime, but ONLY among the files that are actually new. The old
+            # code took `head -1` of a sorted list, which is first
+            # alphabetically and has nothing to do with which session is ours.
+            best=""; best_mt=-1
+            for id in "${new_ids[@]}"; do
+                mt=$(__cm_file_mtime_epoch "$pd/$id.jsonl")
+                [[ -z "$mt" ]] && continue
+                if (( mt > best_mt )); then best_mt="$mt"; best="$id"; fi
+            done
+            __cm_launch_sid="$best"
         fi
+        # DELIBERATELY NO "newest-in-project-key" FALLBACK.
+        #
+        # This used to drop to `ls -1t "$pd"/*.jsonl | head -1` when set-diff
+        # found nothing. That is the exact anti-pattern the spec forbids in the
+        # 11.6.2 single-source rule, and PowerShell removed it for the reason
+        # its comment gives: set-diff finds nothing precisely when the launch
+        # produced no transcript, which is when the user bailed at the splash
+        # screen or the launch aborted. In that state the newest file in the
+        # directory is somebody else's existing conversation, and adopting it
+        # registers a real session under the wrong name.
+        #
+        # Leaving __cm_launch_sid empty is correct here. The caller handles it,
+        # and register-late-guid.sh (spec 14.5) still catches a session whose
+        # transcript appears late.
     fi
     # Check if background helper already registered this GUID.
     if [[ -n "$__cm_launch_sid" ]]; then

@@ -284,6 +284,69 @@ t_search_leaves_sessions_intact() {
 }
 
 # =============================================================================
+# TIER 3 - behaviours that spawn a child process.
+#
+# __cm_resolve_claude is OVERRIDDEN rather than relying on PATH order. Its real
+# implementation looks for `claude` on PATH first, which on this machine finds
+# the genuine binary. A test that launched that would spend subscription time
+# and write into the real project tree.
+# =============================================================================
+
+_use_claude_stub() {
+    # NOT `local stub=...`. bash scopes a local to the CALL, and this override
+    # runs later, from inside __cm_invoke_claude_launch, by which time the
+    # local is gone and $claude_exe resolves to the empty string. That failure
+    # is near-invisible: the launch silently does nothing, which for a test
+    # asserting "no transcript was produced" looks exactly like success.
+    __CM_TEST_STUB="$SCRIPT_DIR/stubs/claude-stub.sh"
+    chmod +x "$__CM_TEST_STUB" 2>/dev/null
+    __cm_resolve_claude() { printf '%s\n' "$__CM_TEST_STUB"; }
+    # Prove the override actually resolves, so a broken stub can never be
+    # mistaken for a launch that legitimately produced nothing.
+    [[ -x "$(__cm_resolve_claude)" ]] || { echo "           stub not executable" >&2; return 90; }
+}
+
+t_launch_bail_adopts_nothing() {
+    # The user starts a new session and quits at the splash screen, so no
+    # transcript is ever written. An unrelated conversation already exists in
+    # the same project key directory.
+    local projdir="$HOME/proj"; mkdir -p "$projdir"
+    local pk pd; pk=$(__cm_get_proj_key "$projdir"); pd="$HOME/.claude/projects/$pk"
+    mkdir -p "$pd"
+    local victim="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    printf '{"type":"user"}\n' > "$pd/$victim.jsonl"
+
+    _use_claude_stub || return 90
+    export CLAUDECM_STUB_PROJDIR="$pd"
+    export CLAUDECM_STUB_GUID="none"     # launch produces no transcript
+    __cm_invoke_claude_launch "$projdir" -- --dangerously-skip-permissions
+    unset CLAUDECM_STUB_PROJDIR CLAUDECM_STUB_GUID
+
+    # spec 11.6.2 single-source rule: with nothing new on disk the answer is
+    # "no session", never "the newest file that happens to be lying there".
+    assert_eq "" "${__cm_launch_sid:-}" \
+        "a launch that produced no transcript must adopt NOTHING; adopting the newest existing file registers somebody else's conversation under this session's name"
+}
+
+t_launch_detects_after_nonzero_exit() {
+    local projdir="$HOME/proj2"; mkdir -p "$projdir"
+    local pk pd; pk=$(__cm_get_proj_key "$projdir"); pd="$HOME/.claude/projects/$pk"
+    mkdir -p "$pd"
+    local newguid="99999999-8888-7777-6666-555555555555"
+
+    _use_claude_stub || return 90
+    export CLAUDECM_STUB_PROJDIR="$pd"
+    export CLAUDECM_STUB_GUID="$newguid"
+    export CLAUDECM_STUB_EXIT="130"      # Ctrl-C
+    __cm_invoke_claude_launch "$projdir" -- --dangerously-skip-permissions
+    unset CLAUDECM_STUB_PROJDIR CLAUDECM_STUB_GUID CLAUDECM_STUB_EXIT
+
+    assert_eq "$newguid" "${__cm_launch_sid:-}" \
+        "spec 14.4: detection must run regardless of the child exit code" || return 90
+    assert_eq "130" "${__cm_launch_exit:-}" "the exit code itself must still be reported"
+}
+
+# =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 # Guards that the two backup destinations stay distinct. See the PowerShell
 # suite for why this is a structural test and not a behavioural one.
@@ -381,6 +444,15 @@ test_case "claudecm -s leaves sessions.txt byte-identical" \
     "truncate sessions.txt while rendering the search header, on the path a quitting user walks" \
     's|__cm_say "=== Sessions matching|: > "$__cm_sessions_file"; __cm_say "=== Sessions matching|' \
     t_search_leaves_sessions_intact
+
+test_case "a launch that produced no transcript adopts nothing (spec 11.6.2)" \
+    "make comm treat files that existed BEFORE the launch as if they were new" \
+    's/comm -13/comm -12/' t_launch_bail_adopts_nothing
+
+test_case "new-session detection survives a non-zero exit (spec 14.4)" \
+    "bail out of __cm_invoke_claude_launch as soon as the child exits non-zero, which is the defect that made sessions vanish unless the user typed /exit" \
+    's/__cm_launch_exit=\$?/__cm_launch_exit=$?; if [[ $__cm_launch_exit -ne 0 ]]; then return 0; fi/' \
+    t_launch_detects_after_nonzero_exit
 
 test_case "orphan quarantine and trim backup remain two distinct directories" \
     "point the orphan scan at __cm_backup_dir, unifying the two destinations" \
