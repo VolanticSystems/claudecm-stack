@@ -139,6 +139,16 @@ function Invoke-InProductScope {
     $savedProfile = $env:USERPROFILE
     try {
         $env:USERPROFILE = $Sandbox.Root
+        # A PRECONDITION, not a test. Every path in this tool derives from
+        # USERPROFILE, so if the redirect ever failed the suite would operate on
+        # the real ~/.claudecm and ~/.claude. That is the one harness failure
+        # that costs data rather than confidence, so it aborts rather than
+        # reports. It is deliberately not a Test-Case: its sabotage would have
+        # to be an edit to this harness rather than to the product, which is
+        # exactly the shape the hollow detector is built to reject.
+        if ($env:USERPROFILE -ne $Sandbox.Root -or $Sandbox.Root -eq $savedProfile) {
+            throw "SANDBOX ISOLATION FAILED: USERPROFILE is '$env:USERPROFILE', expected '$($Sandbox.Root)'. Refusing to run a test against real state."
+        }
         & $sb $Sandbox
     } finally { $env:USERPROFILE = $savedProfile }
 }
@@ -569,6 +579,101 @@ function Get-FunctionBody {
     # other variable. A test a comment can turn red is not testing behaviour.
     ($fn.Extent.Text -split "`n" | ForEach-Object { $_ -replace '#.*$','' }) -join "`n"
 }
+
+# --------------------------------------------------------------- seam fidelity
+#
+# The whole PowerShell suite rests on one unproven claim: that a function
+# lifted out of `claudecm` and re-defined in a synthetic scope behaves the way
+# it does in place. One infidelity has already been found and fixed (the
+# harness imposed StrictMode, which the product never sets). This checks the
+# other realistic failure mode.
+#
+# A lifted function reads variables it never declares: $cmDir, $sessionsFile,
+# $claudeExe and so on come from the enclosing `claudecm` scope. The harness
+# prelude re-creates them by hand. If the product ever reads one the prelude
+# does NOT supply, the lifted function silently sees $null where production
+# sees a real value, every assertion still runs, and the suite goes green while
+# testing something that cannot happen. That is a hollow SUITE rather than a
+# hollow test, and no individual sabotage would catch it.
+
+function Get-FreeVariables {
+    param([string]$FunctionName)
+    $src = $script:FunctionSource[$FunctionName]
+    $errs = $null; $toks = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$toks, [ref]$errs)
+
+    $assigned = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($a in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+        if ($a.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            [void]$assigned.Add($a.Left.VariablePath.UserPath)
+        }
+    }
+    # parameters, both param() blocks and the function($a,$b) shorthand
+    foreach ($p in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ParameterAst] }, $true)) {
+        [void]$assigned.Add($p.Name.VariablePath.UserPath)
+    }
+    # foreach induction variables
+    foreach ($f in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) {
+        [void]$assigned.Add($f.Variable.VariablePath.UserPath)
+    }
+
+    $free = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($v in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+        $name = $v.VariablePath.UserPath
+        if ($v.VariablePath.IsGlobal -or $v.VariablePath.IsScript) { continue }  # $script: is state, not closure
+        # $env:X is PROCESS state, inherited rather than closed over, so the
+        # prelude is not the thing that should supply it. What matters instead
+        # is that the sandbox redirects the one that decides where state lives;
+        # a separate test asserts $env:USERPROFILE points at the sandbox.
+        if ($name -like 'env:*') { continue }
+        if ($assigned.Contains($name)) { continue }
+        [void]$free.Add($name)
+    }
+    $free
+}
+
+# What the prelude actually defines, plus PowerShell's own automatics.
+$script:PreludeSupplies = @(
+    'sandbox','cmDir','sessionsFile','backupDir','lockFile','tmpFile',
+    'claudeExe','machineNameFile','quarantineRoot','cmvExe'
+)
+$script:PSAutomatics = @(
+    '_','args','PSItem','true','false','null','LASTEXITCODE','?','PSScriptRoot',
+    'PSCommandPath','Host','Error','MyInvocation','PWD','HOME','input','PID',
+    'ErrorActionPreference','ProgressPreference','matches','Matches','foreach','switch'
+)
+
+Structural-Case -Name 'the harness supplies every enclosing-scope variable the lifted functions read' `
+    -Sabotage 'have the product read an enclosing variable the harness prelude does not define, which is the shape that makes the whole suite hollow' `
+    -Mutate @{ Find = '$lines = Get-Content $sessionsFile'; Replace = '$lines = Get-Content $sessionsFileTypoNobodyDefines' } `
+    -Body {
+        param($text)
+        # Re-lift from the (possibly mutated) text rather than the cached map,
+        # so the sabotage is actually visible to this check.
+        $errs = $null; $toks = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$toks, [ref]$errs)
+        $all = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+        $saved = $script:FunctionSource
+        $script:FunctionSource = @{}
+        foreach ($fn in $all) { if ($fn.Name -ne 'claudecm') { $script:FunctionSource[$fn.Name] = $fn.Extent.Text } }
+
+        try {
+            # every function any test actually lifts
+            $lifted = $script:Tests | ForEach-Object { $_.Uses } | Sort-Object -Unique
+            $known = @($script:PreludeSupplies) + @($script:PSAutomatics) +
+                     @($script:FunctionSource.Keys)   # sibling functions are defined alongside
+            $unsupplied = @()
+            foreach ($name in $lifted) {
+                if (-not $script:FunctionSource.ContainsKey($name)) { continue }
+                foreach ($v in (Get-FreeVariables $name)) {
+                    if ($known -notcontains $v) { $unsupplied += "$name reads `$$v" }
+                }
+            }
+            Assert-True ($unsupplied.Count -eq 0) `
+                ("the harness does not supply: " + ($unsupplied -join '; ') +
+                 ". A lifted function reading an undefined enclosing variable sees `$null where production sees a value, and the suite goes green testing something that cannot happen.")
+        } finally { $script:FunctionSource = $saved }
+    }
 
 Structural-Case -Name 'the module never spawns powershell.exe' `
     -Sabotage 'point the late-registration Start-Process back at powershell.exe' `
