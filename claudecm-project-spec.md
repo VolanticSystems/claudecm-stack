@@ -70,6 +70,25 @@ Other directories ClaudeCM creates or uses:
 - `~/documents/github/claude-conversation-backup/<project-leaf>/` (Windows) or `~/claude-conversation-backup/<project-leaf>/` (Linux): destination for orphan quarantine and explicit user-initiated quarantine.
 - `<project-dir>/recovery-prompt.md`: recovery primer file written into the user's project. Rotated to `.old`, `.old2`, etc. on regeneration.
 
+### 3.1 The two backup destinations are NOT interchangeable
+
+Files get moved out of the way for two different reasons and they go to two
+different places. Getting this wrong is silent: the file is not lost, it is
+merely somewhere nobody looks.
+
+| destination | what goes there | written by |
+|---|---|---|
+| `~/.claudecm/backup/` | timestamped `sessions.txt` and `settings.json` backups; the pre-trim JSONL (11.13 step 11); the fork predecessor (11.6.1 step 4) | bootstrap, Do-Trim, fork detection |
+| `~/documents/github/claude-conversation-backup/` (Windows), `~/claude-conversation-backup/` (Linux) | orphan quarantine and explicit user-initiated quarantine (11.5) | Do-OrphanScan |
+
+**Each script MUST hold these as two separately named variables.** bash has
+always done so (`__cm_backup_dir`, `__cm_quarantine_root`). PowerShell used a
+single `$backupDir`, assigned at `claudecm` scope and reassigned inside
+`Do-OrphanScan`; behaviour was correct, because PowerShell scopes the inner
+assignment locally, but which directory the name meant depended on which
+function you were reading. Corrected 2026-08-26 to `$backupDir` plus
+`$quarantineRoot`. The test suites assert the two stay distinct.
+
 ---
 
 ## 4. Bootstrap (runs on every invocation, in order)
@@ -272,6 +291,29 @@ Loop:
 9. Numeric → Do-Resume; return.
 10. Anything else → treat as a candidate new project title, confirming before creation (Section 11.8). Added 2026-07-27; bash must match.
 
+### 11.1.1 Search mode (`-s <text>`)
+
+Added 2026-08-26, in both scripts. Triggered when the first arg is `-s` or `-S`. Exists because the list has outgrown one screen.
+
+1. Second arg is the search term. If absent or whitespace only, print the two-line usage and return.
+2. Read the main session list. Match case-insensitively on **DESC only**, as a substring. DIR is deliberately not matched: the operator searches by the name they gave the session.
+3. If nothing matches, print `  No sessions matching '<term>'.` and return.
+4. Otherwise loop:
+   - Print `  === Sessions matching '<term>' ===` and the matching rows, numbered from 1 **in the filtered list**, in the same columns as Show-List.
+   - Print `  <hits> of <total> sessions matching '<term>'`.
+   - Prompt: `  Pick a session (Enter to quit): `
+   - Empty, `q` or `Q` → return.
+   - A number in range → resume that session.
+   - Anything else → reprint the hint and loop.
+
+**Search mode does NOT render the standard Show-List footer**, because that footer advertises `E`, `V` and `M`, and search mode does not accept them. A menu offering a key it will reject is the failure this project keeps having.
+
+**Search mode has NO new-project fallback.** Unlike list mode (11.1 step 10), an unrecognised entry here means a mistyped number, never "create a project called that".
+
+**Implementation note, and the two modules genuinely differ here.** The number shown is a position in the FILTERED list, and it must resolve to the right session.
+- PowerShell: `Do-Resume` only indexes the array it is handed and re-reads state with `Get-Sessions` on every write path, so the filtered array is passed directly and the indices line up.
+- bash: `__cm_do_resume` re-reads the full list itself and indexes into that, so the filtered position MUST be mapped back to the global position before calling it. Passing the filtered number would resume the wrong session.
+
 ### 11.2 Direct resume by number
 
 Triggered when first arg matches `^\d+$` (and is not list mode).
@@ -332,7 +374,7 @@ Inputs: `scan_dir`, `registered_guid`. Returns either `{ Action='select', Guid=<
 6. Print legend and `  Actions: [number] to select, [q number] to quarantine to backup, [Enter] to continue with registered session`.
 7. Parse:
    - `^\d+$` → return `{ Action='select', Guid=<basename of that JSONL> }`.
-   - `^[qQ]\s*(\d+)$` → quarantine: refuse if the GUID matches `registered_guid`. Otherwise move JSONL and (if present) the GUID subdirectory to `<backup-root>/<scan_dir leaf>/`. Run Sync-SessionIndex. Print `  Quarantined to backup: <leaf>/<guid>` in green.
+   - `^[qQ]\s*(\d+)$` → quarantine: refuse if the GUID matches `registered_guid`. Otherwise move JSONL and (if present) the GUID subdirectory to the QUARANTINE ROOT, `~/documents/github/claude-conversation-backup/<scan_dir leaf>/` (Windows) or `~/claude-conversation-backup/<scan_dir leaf>/` (Linux). NOT `~/.claudecm/backup`; see 3.1. Run Sync-SessionIndex. Print `  Quarantined to backup: <leaf>/<guid>` in green.
 8. Return null in all other cases.
 
 ### 11.6 Launch path
@@ -426,7 +468,7 @@ Steps:
      - Load sessions.txt.
      - Find the entry whose guid equals `originalGuid`. If found, swap its guid to the newest basename and reset tokens to empty. Save.
      - Set `effectiveGuid` to the newest basename.
-     - Quarantine the predecessor: move `<originalGuid>.jsonl` (and its sidecar dir if present) from `projDirClaude` into `<backupDir>/<projectLeaf>/`. Then call `Sync-SessionIndex` on `projectDir`. The predecessor is wholly subsumed by the fork (Claude Code copies its history forward), so leaving it on disk would only produce a spurious orphan warning on the next launch.
+     - Quarantine the predecessor: move `<originalGuid>.jsonl` (and its sidecar dir if present) from `projDirClaude` into `~/.claudecm/backup/<projectLeaf>/`, the same destination the pre-trim file uses (11.13 step 11). NOT the orphan quarantine root; see 3.1. Then call `Sync-SessionIndex` on `projectDir`. The predecessor is wholly subsumed by the fork (Claude Code copies its history forward), so leaving it on disk would only produce a spurious orphan warning on the next launch.
    - Otherwise `effectiveGuid` stays equal to `originalGuid`.
 5. Set the script-scoped/global outcome variables. Caller reads them and runs Do-PostExit on the effective guid.
 
