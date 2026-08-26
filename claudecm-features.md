@@ -8,6 +8,7 @@ A wrapper for Claude Code that adds session management: named sessions, resume b
 claudecm                       Launch Claude normally
 claudecm l  (or L)             List saved sessions, pick to resume
 claudecm 3                     Resume session #3 directly
+claudecm -s context            List only sessions whose name contains 'context'
 claudecm --proj C:\myproject   Launch in a specific project directory
 ```
 
@@ -18,6 +19,20 @@ On exit from Claude, you're prompted to name the session. Named sessions are sav
 
 ### Resume by list
 `claudecm l` shows a numbered list. Pick a number to resume that session. Sessions you use get moved to the top of the list (most recent first).
+
+### Search
+
+`claudecm -s <text>` lists only the sessions whose name contains `<text>`,
+case-insensitively. It exists because the list outgrows a screen: instead of
+scrolling past fifty rows you pick from the two or three that matched.
+
+- Numbers shown are positions in the FILTERED list, so `2` means the second
+  match, not the second session overall.
+- Matches the session NAME, not its directory. You search by what you called it.
+- Covers the live list only, not archived sessions. The point is finding
+  something you are working on quickly.
+- Unlike the main list, search mode never treats an unrecognised entry as "make
+  a new project with that name". Here a stray keystroke is a mistyped number.
 
 ### Rename
 When exiting an existing session, you can rename it.
