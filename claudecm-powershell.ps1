@@ -2,6 +2,18 @@ function claudecm {
     $cmDir = "$env:USERPROFILE\.claudecm"
     $sessionsFile = "$cmDir\sessions.txt"
     $machineNameFile = "$cmDir\machine-name.txt"
+    # TWO DISTINCT DESTINATIONS, and they are not interchangeable.
+    #   $cmDir\backup        settings backups, rolling sessions.txt backups, the
+    #                        pre-trim JSONL (spec 11.13 step 11) and the fork
+    #                        predecessor (spec 11.6.1 step 4).
+    #   $quarantineRoot      orphan quarantine and explicit user-initiated
+    #                        quarantine (spec section 3, storage layout).
+    # Named separately because they used to share the name $backupDir, one at
+    # this scope and one assigned inside Do-OrphanScan. PowerShell makes the
+    # inner assignment local so the behaviour was correct, but "which directory
+    # does $backupDir mean here" depended on which function you were reading.
+    # bash has always had these as two variables; this matches it.
+    $quarantineRoot = "$env:USERPROFILE\documents\github\claude-conversation-backup"
     $claudeExe = "$env:USERPROFILE\.local\bin\claude.exe"
     $cmvExe = "$env:APPDATA\npm\cmv.cmd"
     $env:CLAUDE_CODE_REMOTE_SEND_KEEPALIVES = "1"
@@ -508,7 +520,6 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
             if ("$($sessMatch.Dir)".TrimEnd('\','/') -ne "$scanDir".TrimEnd('\','/')) { $hasProblems = $true; break }
         }
         if (-not $hasProblems) { return $null }
-        $backupDir = "$env:USERPROFILE\documents\github\claude-conversation-backup"
         Write-Host ""
         Write-Host "  Multiple conversation files found ($($allJsonl.Count)):" -ForegroundColor Yellow
         Write-Host ""
@@ -553,8 +564,8 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
                 if ($guid -eq $registeredGuid) {
                     Write-Host "  Cannot quarantine the registered session." -ForegroundColor Red
                 } else {
-                    if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
-                    $destSubdir = Join-Path $backupDir (Split-Path $scanDir -Leaf)
+                    if (-not (Test-Path $quarantineRoot)) { New-Item -ItemType Directory -Path $quarantineRoot -Force | Out-Null }
+                    $destSubdir = Join-Path $quarantineRoot (Split-Path $scanDir -Leaf)
                     if (-not (Test-Path $destSubdir)) { New-Item -ItemType Directory -Path $destSubdir -Force | Out-Null }
                     Move-Item $f.FullName (Join-Path $destSubdir $f.Name)
                     $guidDir = Join-Path $projDirClaude $guid
@@ -1116,7 +1127,16 @@ IMPORTANT:
                     '-Desc', "`"$rawDesc`"", '-SessionsFile', "`"$sessionsFile`"")
                 $beforeArg = ($before.Keys -join ',')
                 if ($beforeArg) { $spArgs += @('-BeforeGuids', "`"$beforeArg`"") }
-                Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $spArgs | Out-Null
+                # pwsh, NEVER powershell.exe. Spawning powershell.exe flips the
+                # console to a raster font and resizes the window: an unfixed
+                # conhost defect (microsoft/terminal#367), measured on this
+                # machine 2026-08-26 as 2 failures out of 2 against 0 out of 3
+                # for pwsh. A hidden Start-Process most likely gets its own
+                # console and never touches the caller's, so this particular
+                # call was probably safe, but the cost of using pwsh is zero and
+                # the cost of being wrong is a corrupted terminal. The test
+                # suite asserts this module spawns no powershell.exe at all.
+                Start-Process -FilePath 'pwsh' -WindowStyle Hidden -ArgumentList $spArgs | Out-Null
             }
         } catch {}
         if ($passArgs -and $passArgs.Count -gt 0) {
@@ -1306,6 +1326,66 @@ IMPORTANT:
 
     # --- Main ---
     $firstArg = $args[0]
+
+    # Search mode: show only the sessions whose name contains <text>.
+    # The list has outgrown one screen, so this is how you find one without
+    # scrolling. Numbers shown are positions in the FILTERED list.
+    if ($firstArg -eq '-s' -or $firstArg -eq '-S') {
+        $term = [string]$args[1]
+        if (-not $term.Trim()) {
+            Write-Host ""
+            Write-Host "  Usage: claudecm -s <text>"
+            Write-Host "  Lists only the sessions whose name contains <text>, case-insensitive."
+            Write-Host ""
+            return
+        }
+        $allSessions = Get-Sessions
+        # NOT named $matches: that is a PowerShell automatic variable and the
+        # -match operator below would overwrite it mid-loop.
+        $hits = @($allSessions | Where-Object {
+            $_.Desc -and $_.Desc.ToLower().Contains($term.ToLower())
+        })
+        if ($hits.Count -eq 0) {
+            Write-Host ""
+            Write-Host "  No sessions matching '$term'."
+            Write-Host ""
+            return
+        }
+        while ($true) {
+            # Deliberately NOT Show-List: its footer advertises E, V and M,
+            # and search mode does not accept them. A menu that offers a key
+            # it will reject is the kind of quiet lie this tool exists to
+            # avoid. Rendered here to match the bash module's search view.
+            Write-Host ""
+            Write-Host "  === Sessions matching '$term' ==="
+            Write-Host ""
+            $descWidth = 10
+            foreach ($h in $hits) { if ($h.Desc.Length -gt $descWidth) { $descWidth = $h.Desc.Length } }
+            $n = 0
+            foreach ($h in $hits) {
+                $n++
+                $info = Get-SessionInfo $h.Guid $h.Dir $h.Tokens
+                Write-Host ("  {0,2}. {1} {2,9}  {3,10}   {4}`t{5}" -f `
+                    $n, $h.Desc.PadRight($descWidth + 2), $info.Size, $info.Tokens, $info.Date, $h.Dir)
+            }
+            Write-Host ""
+            Write-Host ("  {0} of {1} sessions matching '{2}'" -f $hits.Count, $allSessions.Count, $term)
+            $pick = Read-Host "  Pick a session (Enter to quit)"
+            if (-not $pick -or $pick -eq 'q' -or $pick -eq 'Q') { return }
+            if ($pick -match '^\d+$') {
+                # Do-Resume only INDEXES the array it is handed; every write
+                # path inside it re-reads state with Get-Sessions. Passing the
+                # filtered array is therefore safe and cannot truncate
+                # sessions.txt.
+                Do-Resume ([int]$pick) $hits
+                return
+            }
+            # Deliberately no new-project fallback here. In search mode an
+            # unrecognised entry means a mistyped number, never "create a
+            # project called that".
+            Write-Host "  Enter a number from the list, or press Enter to quit."
+        }
+    }
 
     # List mode (also default when invoked with no args)
     if (-not $firstArg -or $firstArg -eq 'l' -or $firstArg -eq 'L' -or $firstArg -eq '-l' -or $firstArg -eq '-L') {

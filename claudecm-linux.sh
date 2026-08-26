@@ -951,7 +951,10 @@ __cm_do_trim() {
         __cm_sync_session_index "$d"
     fi
     local leaf; leaf=$(basename "$d")
-    local backup_sub="$HOME/.claudecm/backup/$leaf"
+    # $__cm_backup_dir, not a second hardcoded copy of the same path: the
+    # pre-trim file goes to the .claudecm backup root (spec 11.13 step 11),
+    # NOT to $__cm_quarantine_root, which is for orphans.
+    local backup_sub="$__cm_backup_dir/$leaf"
     mkdir -p "$backup_sub" 2>/dev/null
     local pre_trim_file="$pd/$current_guid.jsonl"
     if [[ -f "$pre_trim_file" ]]; then
@@ -1497,6 +1500,66 @@ claudecm() {
     fi
 
     local first="${1:-}"
+
+    # Search mode: show only the sessions whose name contains <text>.
+    # The list has outgrown one screen, so this is how you find one without
+    # scrolling. Numbers shown are positions in the FILTERED list.
+    if [[ "$first" == "-s" || "$first" == "-S" ]]; then
+        local term="${2:-}"
+        if [[ -z "${term// }" ]]; then
+            __cm_blank
+            __cm_say "Usage: claudecm -s <text>"
+            __cm_say "Lists only the sessions whose name contains <text>, case-insensitive."
+            __cm_blank
+            return
+        fi
+        local all=() hits=() hit_idx=() s gi=0
+        mapfile -t all < <(__cm_get_sessions)
+        local term_lc; term_lc=$(printf '%s' "$term" | tr '[:upper:]' '[:lower:]')
+        for s in "${all[@]}"; do
+            gi=$((gi+1))
+            local _g _d _desc _t desc_lc
+            IFS='|' read -r _g _d _desc _t <<< "$s"
+            desc_lc=$(printf '%s' "$_desc" | tr '[:upper:]' '[:lower:]')
+            if [[ "$desc_lc" == *"$term_lc"* ]]; then
+                hits+=("$s")
+                hit_idx+=("$gi")   # 1-based position in the FULL list
+            fi
+        done
+        if (( ${#hits[@]} == 0 )); then
+            __cm_blank; __cm_say "No sessions matching '$term'."; __cm_blank; return
+        fi
+        while true; do
+            __cm_blank
+            __cm_say "=== Sessions matching '$term' ==="
+            __cm_blank
+            local n=0 g d desc t
+            for s in "${hits[@]}"; do
+                n=$((n+1))
+                IFS='|' read -r g d desc t <<< "$s"
+                __cm_get_session_info "$g" "$d" "$t"
+                printf '  %2d. %-28s %9s  %10s   %s\t%s\n' \
+                    "$n" "$desc" "$__cm_info_size" "$__cm_info_tokens" "$__cm_info_date" "$d"
+            done
+            __cm_blank
+            __cm_say "${#hits[@]} of ${#all[@]} sessions matching '$term'"
+            local pick; printf '  Pick a session (Enter to quit): '; read -r pick
+            [[ -z "$pick" || "$pick" == "q" || "$pick" == "Q" ]] && return
+            if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#hits[@]} )); then
+                # Map the FILTERED position back to the GLOBAL one.
+                # __cm_do_resume re-reads the whole list and indexes into it,
+                # so handing it the filtered number would resume the wrong
+                # session.
+                __cm_do_resume "${hit_idx[$((pick - 1))]}"
+                return
+            fi
+            # Deliberately no new-project fallback in search mode. Here an
+            # unrecognised entry means a mistyped number, never "create a
+            # project called that".
+            __cm_say "Enter a number from the list, or press Enter to quit."
+        done
+    fi
+
     # List mode
     if [[ -z "$first" || "$first" == "l" || "$first" == "L" || "$first" == "-l" || "$first" == "-L" ]]; then
         while true; do
