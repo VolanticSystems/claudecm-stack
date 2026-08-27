@@ -54,6 +54,8 @@ function Get-NestedFunctionSource {
 $script:FunctionSource = Get-NestedFunctionSource -Path $Module
 $script:ClaudeStub = Join-Path $PSScriptRoot 'stubs\claude-stub.ps1'
 if (-not (Test-Path $script:ClaudeStub)) { throw "missing stub: $script:ClaudeStub" }
+$script:CmvStub = Join-Path $PSScriptRoot 'stubs\cmv-stub.ps1'
+if (-not (Test-Path $script:CmvStub)) { throw "missing stub: $script:CmvStub" }
 
 # ------------------------------------------------------------------- sandbox
 
@@ -106,6 +108,10 @@ function New-ProductScope {
     # the benchmark are skipped and the registration logic is reachable on its
     # own. That is the part worth testing; cmv is somebody else's program.
     [void]$sb.AppendLine('$cmvExe       = Join-Path $sandbox.Root "no-such-cmv.cmd"')
+    # A test that NEEDS cmv present opts in with `$cmvExe = $cmvStub` as its
+    # first line. Default absent, because most callers guard on Test-Path and
+    # the interesting logic is what happens around cmv rather than inside it.
+    [void]$sb.AppendLine("`$cmvStub      = '$script:CmvStub'")
     foreach ($name in $Functions) {
         if (-not $script:FunctionSource.ContainsKey($name)) { throw "no such function in module: $name" }
         $src = $script:FunctionSource[$name]
@@ -403,6 +409,137 @@ Test-Case -Name 'new-session detection uses set-diff, not newest-mtime (spec 11.
         } finally {
             Remove-Item Env:CLAUDECM_STUB_PROJDIR, Env:CLAUDECM_STUB_GUID -ErrorAction SilentlyContinue
         }
+    }
+
+Test-Case -Name 'a forked resume follows the fork and files the predecessor (spec 11.6.1)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
+            'Sync-SessionIndex','Test-CleanExitTail','Invoke-ResumeWithForkDetection') `
+    -Sabotage 'delete the Move-Item that files the fork predecessor, leaving it on disk to trip the orphan picker on the next launch' `
+    -Mutate @{ 'Invoke-ResumeWithForkDetection' = @{
+        Find    = 'Move-Item $predFile (Join-Path $destSubdir "$originalGuid.jsonl") -Force'
+        Replace = '$null = $predFile' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'forkproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $orig = '55555555-5555-5555-5555-555555555555'
+        $fork = '66666666-6666-6666-6666-666666666666'
+        Set-Content (Join-Path $keyDir "$orig.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$orig|$projDir|Forked Session|900" -Encoding UTF8
+
+        # Claude Code forks a resumed session to a new GUID; the stub reproduces
+        # that by writing a different transcript than the one we asked to resume.
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        $env:CLAUDECM_STUB_GUID    = $fork
+        try { Invoke-ResumeWithForkDetection $orig $projDir 'machine - Forked Session' }
+        finally { Remove-Item Env:CLAUDECM_STUB_PROJDIR, Env:CLAUDECM_STUB_GUID -ErrorAction SilentlyContinue }
+
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-True ($rows[0].StartsWith($fork)) 'sessions.txt must follow the fork, or the live conversation is unreachable'
+        Assert-True ($rows[0] -match 'Forked Session') 'the session name must survive a fork'
+        Assert-Equal $fork $script:lastResumeGuid 'the caller must be told which GUID is now live'
+        Assert-True (-not (Test-Path (Join-Path $keyDir "$orig.jsonl"))) `
+            'spec 11.6.1 step 4: the predecessor must be filed away, or it becomes a spurious orphan next launch'
+    }
+
+Test-Case -Name 'a resume that did NOT fork changes nothing (spec 11.6.1)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
+            'Sync-SessionIndex','Test-CleanExitTail','Invoke-ResumeWithForkDetection') `
+    -Sabotage 'treat the newest transcript as a fork unconditionally, so an ordinary resume files away the very session the user is using' `
+    -Mutate @{ 'Invoke-ResumeWithForkDetection' = @{
+        Find    = 'if ($newest -and $newest.BaseName -ne $originalGuid -and (-not $beforeNewest -or $newest.BaseName -ne $beforeNewest.BaseName)) {'
+        Replace = 'if ($newest) {' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'plainproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $orig = '77777777-7777-7777-7777-777777777777'
+        Set-Content (Join-Path $keyDir "$orig.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$orig|$projDir|Plain Resume|900" -Encoding UTF8
+
+        # No new transcript: the ordinary case, which is almost every resume.
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        $env:CLAUDECM_STUB_GUID    = 'none'
+        try { Invoke-ResumeWithForkDetection $orig $projDir 'machine - Plain Resume' }
+        finally { Remove-Item Env:CLAUDECM_STUB_PROJDIR, Env:CLAUDECM_STUB_GUID -ErrorAction SilentlyContinue }
+
+        Assert-True (Test-Path (Join-Path $keyDir "$orig.jsonl")) `
+            'an ordinary resume must NOT file away the transcript the user is still using'
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-True ($rows[0].StartsWith($orig)) 'an ordinary resume must leave the registered GUID alone'
+        Assert-Equal '900' ($rows[0] -split '\|')[3] 'an ordinary resume must not reset the token count'
+    }
+
+Test-Case -Name 'Do-Trim quarantines the pre-trim transcript (spec 11.13 step 11)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
+            'Sync-SessionIndex','Do-Trim') `
+    -Sabotage 'delete the Move-Item that files the pre-trim transcript into the backup, which is the omission that caused the April 2026 orphan accumulation' `
+    -Mutate @{ 'Do-Trim' = @{
+        Find    = 'Move-Item $preTrimFile (Join-Path $destSubdir "$currentGuid.jsonl") -Force -ErrorAction SilentlyContinue'
+        Replace = '$null = $preTrimFile' } } `
+    -Body {
+        $cmvExe = $cmvStub
+        $projDir = Join-Path $sandbox.Root 'myproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $oldGuid = '11111111-1111-1111-1111-111111111111'
+        $newGuid = '22222222-2222-2222-2222-222222222222'
+        Set-Content (Join-Path $keyDir "$oldGuid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$oldGuid|$projDir|Trim Me|500" -Encoding UTF8
+
+        $env:CLAUDECM_CMV_NEWGUID  = $newGuid
+        $env:CLAUDECM_CMV_WRITEDIR = $keyDir
+        try { Do-Trim $oldGuid }
+        finally { Remove-Item Env:CLAUDECM_CMV_NEWGUID, Env:CLAUDECM_CMV_WRITEDIR -ErrorAction SilentlyContinue }
+
+        # CMV trim creates a NEW session and leaves the original on disk
+        # unreferenced. If it is not filed away it becomes an orphan and the
+        # next launch greets you with the picker.
+        Assert-True (-not (Test-Path (Join-Path $keyDir "$oldGuid.jsonl"))) `
+            'the pre-trim transcript must not be left in the project key directory'
+        $filed = Join-Path (Join-Path $backupDir (Split-Path $projDir -Leaf)) "$oldGuid.jsonl"
+        Assert-True (Test-Path $filed) `
+            "spec 11.13 step 11: the pre-trim transcript must be moved to the backup, expected at $filed"
+    }
+
+Test-Case -Name 'Do-Trim swaps the GUID in sessions.txt and keeps the row' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
+            'Sync-SessionIndex','Do-Trim') `
+    -Sabotage 'stop assigning the new GUID onto the matching row, so sessions.txt keeps pointing at a transcript that has been filed away' `
+    -Mutate @{ 'Do-Trim' = @{
+        Find = 'if ($s.Guid -eq $currentGuid) { $s.Guid = $newGuid }'; Replace = 'if ($false) { $s.Guid = $newGuid }' } } `
+    -Body {
+        $cmvExe = $cmvStub
+        $projDir = Join-Path $sandbox.Root 'myproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $oldGuid = '33333333-3333-3333-3333-333333333333'
+        $newGuid = '44444444-4444-4444-4444-444444444444'
+        Set-Content (Join-Path $keyDir "$oldGuid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$oldGuid|$projDir|Keep My Name|500" -Encoding UTF8
+
+        $env:CLAUDECM_CMV_NEWGUID  = $newGuid
+        $env:CLAUDECM_CMV_WRITEDIR = $keyDir
+        try { Do-Trim $oldGuid }
+        finally { Remove-Item Env:CLAUDECM_CMV_NEWGUID, Env:CLAUDECM_CMV_WRITEDIR -ErrorAction SilentlyContinue }
+
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-Equal 1 $rows.Count 'trim must not add or drop a row'
+        Assert-True ($rows[0].StartsWith($newGuid)) `
+            'the row must now point at the trimmed transcript, or the session is unreachable'
+        Assert-True ($rows[0] -match 'Keep My Name') 'the session name must survive a trim'
     }
 
 Test-Case -Name 'Do-PostExit bumps the exited session to the top (MRU)' `
