@@ -1018,6 +1018,156 @@ Test-Case -Name 'Do-DeleteSession removes the transcript AND its sidecar directo
             'deleting one session must not touch any other session in the same project'
     }
 
+# -----------------------------------------------------------------------------
+# Sync-SessionIndex. The largest single function in the module and, until now,
+# untested.
+#
+# It repairs Claude Code's OWN sessions-index.json, which is what its /resume
+# picker reads. Getting it wrong does not break ClaudeCM visibly; it breaks the
+# other program quietly, which is the worst failure shape available.
+#
+# Every expected index below is HAND-WRITTEN. Generating the oracle with the
+# same function under test would bind nothing at all: it would assert only that
+# the function is deterministic, which is not in question.
+# -----------------------------------------------------------------------------
+
+function New-IndexEntry {
+    param([string]$Guid, [string]$Path, [string]$Prompt = 'seeded', [string]$ProjPath = 'C:\seeded')
+    @{ sessionId = $Guid; fullPath = $Path; fileMtime = 1700000000000
+       firstPrompt = $Prompt; messageCount = 1
+       created = '2026-01-01T00:00:00.000Z'; modified = '2026-01-01T00:00:00.000Z'
+       gitBranch = ''; projectPath = $ProjPath; isSidechain = $false }
+}
+
+Test-Case -Name 'Sync-SessionIndex drops entries whose transcript is gone' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Sync-SessionIndex') `
+    -Sabotage 'seed the kept-list with every existing entry, so a session deleted from disk stays in the index forever' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find = '$validEntries = @()'; Replace = '$validEntries = @($existingEntries)' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'syncproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $alive = '11111111-2222-3333-4444-555555555555'
+        $dead  = '99999999-8888-7777-6666-555555555555'
+        Set-Content (Join-Path $keyDir "$alive.jsonl") '{"type":"user"}' -Encoding UTF8
+        # $dead deliberately has NO file: this is the state left behind by a
+        # delete, a trim, or a quarantine.
+
+        $indexPath = Join-Path $keyDir 'sessions-index.json'
+        @{ version = 1; originalPath = $projDir; entries = @(
+            (New-IndexEntry $alive (Join-Path $keyDir "$alive.jsonl")),
+            (New-IndexEntry $dead  (Join-Path $keyDir "$dead.jsonl"))
+        ) } | ConvertTo-Json -Depth 10 | Set-Content $indexPath -Encoding UTF8
+
+        Set-Content $sessionsFile "$alive|$projDir|Alive Session|10" -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $after = Get-Content $indexPath -Raw | ConvertFrom-Json
+        $ids = @($after.entries | ForEach-Object { $_.sessionId })
+        Assert-Equal 1 $ids.Count "the index must list exactly the transcripts that exist; got $($ids -join ', ')"
+        Assert-Equal $alive $ids[0] 'the surviving entry must be the one whose file is still on disk'
+    }
+
+Test-Case -Name 'Sync-SessionIndex adds an entry for a transcript it has never seen' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Sync-SessionIndex') `
+    -Sabotage 'write only the surviving entries and discard the newly discovered ones, so a transcript that exists never becomes resumable' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find = '$allEntries = @($validEntries) + @($newEntries)'; Replace = '$allEntries = @($validEntries)' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'syncproj2'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $known = 'aaaa1111-2222-3333-4444-555555555555'
+        $fresh = 'bbbb1111-2222-3333-4444-555555555555'
+        Set-Content (Join-Path $keyDir "$known.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content (Join-Path $keyDir "$fresh.jsonl") '{"type":"user"}' -Encoding UTF8
+
+        $indexPath = Join-Path $keyDir 'sessions-index.json'
+        @{ version = 1; originalPath = $projDir
+           entries = @((New-IndexEntry $known (Join-Path $keyDir "$known.jsonl"))) } |
+            ConvertTo-Json -Depth 10 | Set-Content $indexPath -Encoding UTF8
+
+        Set-Content $sessionsFile @(
+            "$known|$projDir|Known One|10", "$fresh|$projDir|Fresh One|20") -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $after = Get-Content $indexPath -Raw | ConvertFrom-Json
+        $ids = @($after.entries | ForEach-Object { $_.sessionId })
+        Assert-Equal 2 $ids.Count "both transcripts on disk must be indexed; got $($ids -join ', ')"
+        Assert-True ($ids -contains $fresh) 'the unindexed transcript is the whole point of the repair'
+        Assert-True ($ids -contains $known) 'repairing the index must not lose what was already correct'
+    }
+
+Test-Case -Name 'Sync-SessionIndex labels a new entry with the name from sessions.txt' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Sync-SessionIndex') `
+    -Sabotage 'stop copying the session description, so every repaired entry shows a blank name in the resume picker' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find = '$firstPrompt = $sessMatch.Desc'; Replace = '$firstPrompt = ""' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'syncproj3'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        # No index at all. This is the from-scratch path, which is what a fresh
+        # project and a corrupted index both land on.
+        $guid = 'cccc1111-2222-3333-4444-555555555555'
+        Set-Content (Join-Path $keyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$guid|$projDir|Refactor The Parser|10" -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $indexPath = Join-Path $keyDir 'sessions-index.json'
+        Assert-True (Test-Path $indexPath) 'a missing index must be created, not skipped'
+        $after = Get-Content $indexPath -Raw | ConvertFrom-Json
+        Assert-Equal 1 @($after.entries).Count 'exactly one transcript, exactly one entry'
+        Assert-Equal 'Refactor The Parser' $after.entries[0].firstPrompt `
+            'the name ClaudeCM knows must be the name the resume picker shows, or the two lists disagree about what a session is'
+        Assert-Equal $projDir $after.entries[0].projectPath `
+            'the entry must point at the project directory sessions.txt records'
+    }
+
+Test-Case -Name 'Sync-SessionIndex preserves an existing originalPath' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Sync-SessionIndex') `
+    -Sabotage 'always overwrite originalPath with the directory being synced, which silently repoints a project that has been moved' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find = 'if ($indexData.originalPath) { $originalPath = $indexData.originalPath }'
+        Replace = '$null = $indexData' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'syncproj4'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $guid = 'dddd1111-2222-3333-4444-555555555555'
+        Set-Content (Join-Path $keyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+
+        # originalPath is Claude Code's record of where the project first lived.
+        # It is deliberately NOT the directory being synced here. Overwriting it
+        # is the difference between "this project moved" and "this project has
+        # always been here", and only the first one is true.
+        $wasAt = 'C:\Users\someone\oldlocation'
+        $indexPath = Join-Path $keyDir 'sessions-index.json'
+        @{ version = 1; originalPath = $wasAt
+           entries = @((New-IndexEntry $guid (Join-Path $keyDir "$guid.jsonl"))) } |
+            ConvertTo-Json -Depth 10 | Set-Content $indexPath -Encoding UTF8
+
+        Set-Content $sessionsFile "$guid|$projDir|Moved Project|10" -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $after = Get-Content $indexPath -Raw | ConvertFrom-Json
+        Assert-Equal $wasAt $after.originalPath `
+            'a sync is a repair, not a relocation: it must not rewrite where the project came from'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #
