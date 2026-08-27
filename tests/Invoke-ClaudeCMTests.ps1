@@ -974,9 +974,9 @@ Test-Case -Name 'Save-ArchivedSessions writes the [archived] marker' `
         # The marker is the ONLY thing separating the two lists. Without it the
         # archived rows parse as ordinary sessions and reappear in the menu,
         # which is the whole point of archiving them undone.
-        Assert-Equal 1 @(Get-Sessions).Count `
+        Assert-Equal 1 (Get-Sessions).Count `
             'an archived session must not come back as a live one'
-        Assert-Equal 1 @(Get-ArchivedSessions).Count `
+        Assert-Equal 1 (Get-ArchivedSessions).Count `
             'the archived session must be readable back out of the archive'
         Assert-True ((Get-Content $sessionsFile -Raw) -match '\[archived\]') `
             'the marker line must be present in the file itself'
@@ -1490,6 +1490,144 @@ Test-Case -Name 'a refresh that produced no session leaves sessions.txt untouche
             'a failed refresh must leave the original session exactly as it was, name included'
     }
 
+# -----------------------------------------------------------------------------
+# The interactive surface. Left until last because it blocks on input, not
+# because it matters less: two of the four functions below can destroy work.
+#
+# Read-Host is shadowed with a SCRIPTED SEQUENCE rather than a single answer,
+# because the interesting paths are the ones that ask twice.
+# -----------------------------------------------------------------------------
+
+function Use-Answers {
+    param([string[]]$Answers)
+    $script:__ans = $Answers
+    $script:__ansIdx = 0
+}
+
+Test-Case -Name 'Show-List numbers sessions from 1' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Get-SessionDisplayName','Move-SessionToTop','Do-DeleteSession','Do-OrphanScan','Resolve-ResumeOrRecover','Build-RecoveryMetaPrompt','Do-ViewArchived','Do-Resume','Show-List') `
+    -Sabotage 'number the list from 0, so every number the user is shown is one off from the number the code accepts' `
+    -Mutate @{ 'Show-List' = @{
+        Find = '$num = "$($i+1).".PadRight($numWidth + 2)'; Replace = '$num = "$($i).".PadRight($numWidth + 2)' } } `
+    -Body {
+        $sessions = @(
+            [pscustomobject]@{ Guid='1111dddd-1111-2222-3333-444444444444'; Dir=$sandbox.Root; Desc='First Thing';  Tokens='10' },
+            [pscustomobject]@{ Guid='2222dddd-1111-2222-3333-444444444444'; Dir=$sandbox.Root; Desc='Second Thing'; Tokens='20' }
+        )
+        # 6>&1 is required: the module speaks through Write-Host, which writes to
+        # the information stream, not the success pipeline. Without the redirect
+        # the capture is empty and every assertion below could not fail.
+        $out = (Show-List $sessions 6>&1 | Out-String)
+
+        Assert-True ($out -match '(?m)^\s+1\.\s') `
+            'the first session must be numbered 1: every selection path indexes off the number printed here'
+        Assert-True ($out -notmatch '(?m)^\s+0\.\s') `
+            'there is no session 0; a zero-based display makes the whole list off by one'
+        Assert-True ($out -match 'Second Thing') 'every session must appear'
+    }
+
+Test-Case -Name 'Do-Resume rejects a pick of 0 instead of resuming the last session' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Get-SessionDisplayName','Move-SessionToTop','Do-DeleteSession','Do-OrphanScan','Resolve-ResumeOrRecover','Build-RecoveryMetaPrompt','Do-ViewArchived','Do-Resume','Show-List') `
+    -Sabotage 'weaken the lower bound to allow 0, which in PowerShell indexes $sessions[-1] and silently resumes the LAST session instead' `
+    -Mutate @{ 'Do-Resume' = @{
+        Find = 'if ($pick -lt 1 -or $pick -gt $sessions.Count) {'; Replace = 'if ($pick -lt 0 -or $pick -gt $sessions.Count) {' } } `
+    -Body {
+        # This is not a pedantic bounds check. $sessions[0 - 1] is $sessions[-1]
+        # in PowerShell, which is the LAST element rather than an error, so a
+        # weakened lower bound does not crash: it quietly opens the wrong
+        # conversation. Nothing in the output would tell the user.
+        Use-Answers @('3','3','3')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        $projDir = $sandbox.Root
+        New-Item -ItemType Directory -Path (Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)) -Force | Out-Null
+
+        $rows = @(
+            "1111eeee-1111-2222-3333-444444444444|$projDir|Alpha|1",
+            "2222eeee-1111-2222-3333-444444444444|$projDir|Beta|2",
+            "3333eeee-1111-2222-3333-444444444444|$projDir|Gamma|3"
+        )
+        Set-Content $sessionsFile $rows -Encoding UTF8
+        # NOT @(Get-Sessions). Spec 14.3: the function returns ,$sessions so the
+        # array survives PowerShell unrolling, which means it is ALREADY an
+        # array and @() wraps it in a second one. Do-Resume would then be handed
+        # a single-element list holding a list, and $sel.Dir would be $null.
+        $sessions = Get-Sessions
+
+        $null = (Do-Resume 0 $sessions 6>&1)
+
+        # Move-SessionToTop is the first thing a real resume does, so the order
+        # is the tell. No transcripts exist for these GUIDs, so even a sabotaged
+        # run stops at the recovery menu and answers cancel: nothing launches
+        # either way, and the only observable difference is the reordering.
+        $after = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-Equal $rows[0] $after[0] `
+            'a pick of 0 is not a selection; nothing may be resumed and the list must not be reordered'
+        Assert-Equal 3 $after.Count 'and no row may be added or lost'
+    }
+
+Test-Case -Name 'a permanent delete needs the word delete, not any confirmation' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Get-SessionDisplayName','Move-SessionToTop','Do-DeleteSession','Do-OrphanScan','Resolve-ResumeOrRecover','Build-RecoveryMetaPrompt','Do-ViewArchived','Do-Resume','Show-List') `
+    -Sabotage 'accept any answer as confirmation, so an absent-minded y destroys a conversation permanently' `
+    -Mutate @{ 'Do-ViewArchived' = @{
+        Find = "if (`$confirm -match '^delete`$') {"; Replace = 'if ($true) {' } } `
+    -Body {
+        # The prompt says "Type 'delete' to confirm" and this is the only guard
+        # between a keystroke and an unrecoverable loss. The answer given below
+        # is 'yes', which is exactly the kind of thing a person types on
+        # autopilot after a day of y/N prompts.
+        Use-Answers @('D1', 'yes', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        $projDir = Join-Path $sandbox.Root 'archproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $guid = '5555ffff-1111-2222-3333-444444444444'
+        $jsonl = Join-Path $keyDir "$guid.jsonl"
+        Set-Content $jsonl '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile @(
+            "6666ffff-1111-2222-3333-444444444444|$projDir|Live One|5",
+            '[archived]',
+            "$guid|$projDir|Old But Wanted|50") -Encoding UTF8
+
+        $null = (Do-ViewArchived 6>&1)
+
+        Assert-True (Test-Path $jsonl) `
+            'answering anything other than the word delete must leave the conversation on disk; this is the last guard before permanent loss'
+        Assert-Equal 1 (Get-ArchivedSessions).Count 'and the archive entry must remain'
+    }
+
+Test-Case -Name 'unarchiving moves a session across, it does not copy it' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Get-SessionDisplayName','Move-SessionToTop','Do-DeleteSession','Do-OrphanScan','Resolve-ResumeOrRecover','Build-RecoveryMetaPrompt','Do-ViewArchived','Do-Resume','Show-List') `
+    -Sabotage 'leave the entry in the archive after adding it to the live list, so one session exists twice under two numbers' `
+    -Mutate @{ 'Do-ViewArchived' = @{
+        Find = '$archived = @($archived | Where-Object { $_ -ne $entry })'; Replace = '$archived = @($archived)' } } `
+    -Body {
+        Use-Answers @('U1', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        $projDir = Join-Path $sandbox.Root 'unarch'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+
+        Set-Content $sessionsFile @(
+            "7777aaaa-1111-2222-3333-444444444444|$projDir|Still Live|5",
+            '[archived]',
+            "8888aaaa-1111-2222-3333-444444444444|$projDir|Coming Back|50") -Encoding UTF8
+
+        $null = (Do-ViewArchived 6>&1)
+
+        $live = Get-Sessions
+        Assert-Equal 2 $live.Count 'the unarchived session must appear in the live list'
+        Assert-True ($live[0].Desc -eq 'Coming Back') 'and it belongs at the top, as the most recent action'
+        Assert-Equal 0 (Get-ArchivedSessions).Count `
+            'it must LEAVE the archive: a session listed in both places is one session wearing two numbers, and archiving it again would not remove it'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #
@@ -1525,6 +1663,55 @@ function Get-FunctionBody {
     # other variable. A test a comment can turn red is not testing behaviour.
     ($fn.Extent.Text -split "`n" | ForEach-Object { $_ -replace '#.*$','' }) -join "`n"
 }
+
+# ------------------------------------------------------- the suite's own trap
+#
+# Two assertions in this file were silently unfailable until 2026-08-27, both
+# written as @(Get-Sessions).Count. Spec 14.3 exists because Get-Sessions and
+# Get-ArchivedSessions return `,$sessions`, deliberately, so the array survives
+# PowerShell's unrolling of a function's return value. They therefore already
+# ARE arrays, and @() around one builds a NEW one-element array containing it.
+# .Count is then 1 no matter what the file holds, and an assertion that reads
+# `Assert-Equal 1 @(Get-Sessions).Count` can never go red.
+#
+# That is worse than a wrong test: it is a test that looks like coverage. No
+# per-test sabotage finds it, because the sabotage is in the assertion rather
+# than in the product, so it needs a check at this level.
+#
+# Correct idiom: (Get-Sessions).Count, no @().
+
+Structural-Case -Name 'the suite never re-wraps a comma-returned array' `
+    -Sabotage 'reintroduce the @() wrapper the spec forbids' `
+    -Mutate @{ Find = 'return ,$sessions'; Replace = 'return $sessions' } `
+    -Body {
+        param($ModuleText)
+        # Two halves, and they check different things.
+        #
+        # First: this FILE must not contain the nesting idiom. Read from disk
+        # rather than from $ModuleText, because the fault being guarded lives in
+        # the tests, not in the product.
+        # Comments are stripped first. This file explains the trap by name in
+        # several places, and a guard that cannot tell an explanation from an
+        # occurrence is the same defect that once made a structural test bind a
+        # comment instead of code.
+        $suite = (Get-Content $PSCommandPath | ForEach-Object { $_ -replace '#.*$','' }) -join "`n"
+        # The needles are ASSEMBLED rather than written out, because this check
+        # scans the file it lives in: spelling them literally would make the
+        # guard find itself and fail on a clean suite.
+        $at = [char]64
+        foreach ($fn in @('Get-Sessions','Get-ArchivedSessions')) {
+            $bad = "$at($fn)"
+            if ($suite.Contains($bad)) {
+                throw "$script:AssertSentinel the suite contains $bad, which nests the comma-returned array so .Count is always 1; write ($fn).Count instead"
+            }
+        }
+        # Second: the product must still comma-return, which is what makes the
+        # idiom above correct. This is the half the sabotage moves.
+        $clean = ($ModuleText -split "`n" | ForEach-Object { $_ -replace '#.*$','' }) -join "`n"
+        if ($clean -notmatch 'return\s+,\$sessions') {
+            throw "$script:AssertSentinel spec 14.3: Get-Sessions and Get-ArchivedSessions must return ,`$sessions or a single-element list unrolls to a bare object and the list renders empty"
+        }
+    }
 
 # --------------------------------------------------------------- seam fidelity
 #
