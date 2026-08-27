@@ -411,6 +411,80 @@ Test-Case -Name 'new-session detection uses set-diff, not newest-mtime (spec 11.
         }
     }
 
+Test-Case -Name 'Format-DateShort adds the year only for a previous year (spec 7)' `
+    -Uses @('Format-DateShort') `
+    -Sabotage 'compare against the wrong side of the year boundary so this year gets a year stamp and last year does not' `
+    -Mutate @{ 'Format-DateShort' = @{ Find = '-lt (Get-Date).Year'; Replace = '-gt (Get-Date).Year' } } `
+    -Body {
+        $thisYear = Get-Date -Month 3 -Day 13 -Year ((Get-Date).Year)
+        $lastYear = Get-Date -Month 3 -Day 13 -Year ((Get-Date).Year - 1)
+        Assert-Equal 'Mar 13' (Format-DateShort $thisYear) 'spec 7: the current year is implied and omitted'
+        Assert-Equal ("Mar 13, " + ((Get-Date).Year - 1)) (Format-DateShort $lastYear) `
+            'spec 7: an older session must show its year, or two rows a year apart look identical'
+    }
+
+Test-Case -Name 'Get-ArchivedSessions reads only below the [archived] marker (spec 5)' `
+    -Uses @('Parse-SessionLine','Get-ArchivedSessions') `
+    -Sabotage 'start collecting before the marker instead of after, so live sessions are reported as archived' `
+    -Mutate @{ 'Get-ArchivedSessions' = @{ Find = '$inArchived = $false'; Replace = '$inArchived = $true' } } `
+    -Body {
+        Set-Content $sessionsFile @(
+            'aaa|C:\p|Live One|1', 'bbb|C:\p|Live Two|2', '[archived]', 'ccc|C:\p|Old One|3'
+        ) -Encoding UTF8
+        $arch = Get-ArchivedSessions
+        Assert-Equal 1 $arch.Count 'only rows below the marker are archived'
+        Assert-Equal 'Old One' $arch[0].Desc 'the archived row must be the one below the marker'
+    }
+
+Test-Case -Name 'Move-SessionToTop promotes without losing or duplicating rows (spec 5)' `
+    -Uses @('Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock',
+            'Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Move-SessionToTop') `
+    -Sabotage 'append the promoted session instead of prepending it, so the list is no longer most-recently-used' `
+    -Mutate @{ 'Move-SessionToTop' = @{
+        Find = '$new = @($match) + @($rest)'; Replace = '$new = @($rest) + @($match)' } } `
+    -Body {
+        Set-Content $sessionsFile @(
+            'aaa|C:\p|First|1', 'bbb|C:\p|Second|2', 'ccc|C:\p|Third|3'
+        ) -Encoding UTF8
+        Move-SessionToTop 'ccc'
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-Equal 3 $rows.Count 'promotion must not add or drop a row'
+        Assert-True ($rows[0].StartsWith('ccc')) 'the promoted session must be row 1'
+        Assert-True ($rows[1].StartsWith('aaa')) 'the others must keep their relative order'
+    }
+
+# DELETED: 'Move-SessionToTop on an unknown GUID leaves the file alone'.
+#
+# It was written, ran green, and the hollow detector then refused it twice. The
+# reason is worth keeping even though the test is not.
+#
+# Move-SessionToTop is safe here by construction, TWICE over. The early
+# `if (-not $match) { return }` exits before anything else runs, so any
+# mutation further down is unreachable. And removing that guard changes
+# nothing either: with no match, @($match) is an EMPTY array, so
+# @($match) + @($rest) equals $rest and the file is rewritten byte-identically.
+#
+# There is therefore no edit to the product that makes the assertion go red.
+# Per the rule this suite is built on, that means it is not a test. Keeping it
+# would have added a green line that could never catch anything, which is
+# exactly the thing the project shipped thirteen of once already.
+
+Test-Case -Name 'Get-SessionInfo marks a missing transcript and keeps its token count (spec 8)' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Get-SessionInfo') `
+    -Sabotage 'report a missing transcript as ok, so a lost session looks healthy in the list' `
+    -Mutate @{ 'Get-SessionInfo' = @{ Find = "Size = ""(missing)"""; Replace = "Size = ""0 B""" } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'infoproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        # nothing on disk for this GUID at all
+        $r = Get-SessionInfo 'deadbeef-0000-0000-0000-000000000000' $projDir '155000'
+        Assert-Equal '(missing)' $r.Size 'spec 8: a missing transcript must say so rather than showing a size'
+        Assert-Equal 'missing' $r.Status 'status must report missing'
+        Assert-Equal '155K tok' $r.Tokens `
+            'spec 8: the historical token count stays meaningful even when the file is gone'
+        Assert-Equal '--' $r.Date 'with no fallback available the date is --'
+    }
+
 Test-Case -Name 'Sync-SessionIndex drops entries whose transcript is gone (spec 10 step 6)' `
     -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Sync-SessionIndex') `
     -Sabotage 'seed validEntries with every pre-existing entry before the on-disk filter runs, so stale rows survive' `
