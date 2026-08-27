@@ -411,6 +411,89 @@ Test-Case -Name 'new-session detection uses set-diff, not newest-mtime (spec 11.
         }
     }
 
+Test-Case -Name 'Do-OrphanScan stays silent when every transcript is accounted for' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Sync-SessionIndex','Do-OrphanScan') `
+    -Sabotage 'break the directory comparison so a correctly-registered transcript always looks like it belongs elsewhere' `
+    -Mutate @{ 'Do-OrphanScan' = @{
+        Find    = 'if ("$($sessMatch.Dir)".TrimEnd(''\'',''/'') -ne "$scanDir".TrimEnd(''\'',''/'')) { $hasProblems = $true; break }'
+        Replace = 'if ($true) { $hasProblems = $true; break }' } } `
+    -Body {
+        # The picker interrupting a launch when nothing is wrong is not a
+        # cosmetic annoyance: it trained the operator to dismiss it, which is
+        # how a real orphan gets ignored. Two files, both registered, both
+        # belonging here, must produce silence.
+        function Read-Host { param([string]$Prompt) throw "$script:AssertSentinel Do-OrphanScan prompted when there was nothing to report" }
+        $projDir = Join-Path $sandbox.Root 'tidy'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+        $a = 'aaaaaaaa-1111-1111-1111-111111111111'
+        $b = 'bbbbbbbb-2222-2222-2222-222222222222'
+        Set-Content (Join-Path $keyDir "$a.jsonl") '{}' -Encoding UTF8
+        Set-Content (Join-Path $keyDir "$b.jsonl") '{}' -Encoding UTF8
+        Set-Content $sessionsFile @("$a|$projDir|One|1", "$b|$projDir|Two|2") -Encoding UTF8
+
+        $r = Do-OrphanScan $projDir $a
+        Assert-True ($null -eq $r) 'a project whose transcripts are all registered here must not raise the picker'
+    }
+
+Test-Case -Name 'Do-OrphanScan quarantines to the quarantine root, not the trim backup (spec 3.1)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Sync-SessionIndex','Do-OrphanScan') `
+    -Sabotage 'send the quarantined transcript to $backupDir, the trim/settings directory, instead of the quarantine root' `
+    -Mutate @{ 'Do-OrphanScan' = @{
+        Find = '$destSubdir = Join-Path $quarantineRoot (Split-Path $scanDir -Leaf)'; Replace = '$destSubdir = Join-Path $backupDir (Split-Path $scanDir -Leaf)' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) 'q 2' }
+        $projDir = Join-Path $sandbox.Root 'messy'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+        $live   = 'cccccccc-3333-3333-3333-333333333333'
+        $orphan = 'dddddddd-4444-4444-4444-444444444444'
+        Set-Content (Join-Path $keyDir "$live.jsonl")   '{}' -Encoding UTF8
+        Set-Content (Join-Path $keyDir "$orphan.jsonl") '{}' -Encoding UTF8
+        # listing is newest-first, so make the orphan older and it is row 2
+        (Get-Item (Join-Path $keyDir "$orphan.jsonl")).LastWriteTime = (Get-Date).AddHours(-2)
+        Set-Content $sessionsFile "$live|$projDir|Live One|1" -Encoding UTF8
+
+        $null = Do-OrphanScan $projDir $live
+
+        $landed = Join-Path (Join-Path $quarantineRoot (Split-Path $projDir -Leaf)) "$orphan.jsonl"
+        Assert-True (Test-Path $landed) "spec 3.1: an orphan belongs in the quarantine root, expected at $landed"
+        Assert-True (-not (Test-Path (Join-Path $keyDir "$orphan.jsonl"))) 'the orphan must leave the project key directory'
+        Assert-True (Test-Path (Join-Path $keyDir "$live.jsonl")) 'the live session must be untouched'
+    }
+
+Test-Case -Name 'Do-OrphanScan refuses to quarantine the registered session' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Sync-SessionIndex','Do-OrphanScan') `
+    -Sabotage 'remove the guard that refuses to quarantine the registered session' `
+    -Mutate @{ 'Do-OrphanScan' = @{
+        Find = 'if ($guid -eq $registeredGuid) {'; Replace = 'if ($false) {' } } `
+    -Body {
+        # The one keystroke that must never work. Quarantining the registered
+        # session moves the conversation the operator is about to resume.
+        function Read-Host { param([string]$Prompt) 'q 1' }
+        $projDir = Join-Path $sandbox.Root 'protect'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+        $live   = 'eeeeeeee-5555-5555-5555-555555555555'
+        $orphan = 'ffffffff-6666-6666-6666-666666666666'
+        Set-Content (Join-Path $keyDir "$live.jsonl")   '{}' -Encoding UTF8
+        Set-Content (Join-Path $keyDir "$orphan.jsonl") '{}' -Encoding UTF8
+        # make the LIVE one newest so 'q 1' targets exactly the protected file
+        (Get-Item (Join-Path $keyDir "$orphan.jsonl")).LastWriteTime = (Get-Date).AddHours(-2)
+        Set-Content $sessionsFile "$live|$projDir|Do Not Move Me|1" -Encoding UTF8
+
+        $null = Do-OrphanScan $projDir $live
+
+        Assert-True (Test-Path (Join-Path $keyDir "$live.jsonl")) `
+            'the registered session must still be in place: quarantining it moves the conversation the operator is about to resume'
+    }
+
 Test-Case -Name 'a forked resume follows the fork and files the predecessor (spec 11.6.1)' `
     -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
             'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
