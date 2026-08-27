@@ -1168,6 +1168,150 @@ Test-Case -Name 'Sync-SessionIndex preserves an existing originalPath' `
             'a sync is a repair, not a relocation: it must not rewrite where the project came from'
     }
 
+# -----------------------------------------------------------------------------
+# Resolve-ResumeOrRecover. The gate every resume passes through.
+#
+# It answers one question: does this session still have a transcript, and if not
+# what should happen instead. Getting the healthy case wrong is the expensive
+# direction, because it diverts a working session into recovery.
+# -----------------------------------------------------------------------------
+
+Test-Case -Name 'Resolve-ResumeOrRecover resumes normally when the transcript exists' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Get-SessionInfo','Sync-SessionIndex','Build-RecoveryMetaPrompt','Resolve-ResumeOrRecover') `
+    -Sabotage 'return the recovery verdict even when the transcript is present, diverting every healthy session into the lost-conversation flow' `
+    -Mutate @{ 'Resolve-ResumeOrRecover' = @{
+        Find    = "return [PSCustomObject]@{ Action='normal'; Guid=`$guid }"
+        Replace = "return [PSCustomObject]@{ Action='fresh'; Guid=`$null }" } } `
+    -Body {
+        # Answers 3 (cancel) if anything asks. Nothing should: a healthy session
+        # must return before the menu. Returning a value rather than throwing is
+        # deliberate, so a sabotage that reaches the prompt produces a red
+        # assertion instead of an error, which would only be inconclusive.
+        function Read-Host { param([string]$Prompt) '3' }
+
+        $projDir = Join-Path $sandbox.Root 'healthy'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+        $guid = '0a0a0a0a-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+
+        $r = Resolve-ResumeOrRecover $guid $projDir 'Healthy Session' 100
+        Assert-Equal 'normal' $r.Action 'a session whose transcript is on disk must resume, not recover'
+        Assert-Equal $guid $r.Guid 'it must resume the GUID it was asked about'
+    }
+
+Test-Case -Name 'Resolve-ResumeOrRecover returns a null GUID when starting fresh' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Get-SessionInfo','Sync-SessionIndex','Build-RecoveryMetaPrompt','Resolve-ResumeOrRecover') `
+    -Sabotage 'hand the dead GUID back with the fresh verdict, so the caller resumes a transcript that is not there' `
+    -Mutate @{ 'Resolve-ResumeOrRecover' = @{
+        Find    = "'1' { return [PSCustomObject]@{ Action='fresh'; Guid=`$null } }"
+        Replace = "'1' { return [PSCustomObject]@{ Action='fresh'; Guid=`$guid } }" } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '1' }
+
+        $projDir = Join-Path $sandbox.Root 'lost'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)) -Force | Out-Null
+        # No transcript written: this is the 30-day-cleanup state.
+
+        $r = Resolve-ResumeOrRecover 'dead0000-1111-2222-3333-444444444444' $projDir 'Lost Session' 100
+        Assert-Equal 'fresh' $r.Action 'choice 1 starts a new session in that directory'
+        Assert-True ($null -eq $r.Guid) `
+            'the GUID must be dropped: a fresh start that carries the dead GUID resumes nothing and re-registers a session that does not exist'
+    }
+
+Test-Case -Name 'Resolve-ResumeOrRecover cancels on choice 3' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Get-SessionInfo','Sync-SessionIndex','Build-RecoveryMetaPrompt','Resolve-ResumeOrRecover') `
+    -Sabotage 'treat cancel as a fresh start, launching a session the user just declined' `
+    -Mutate @{ 'Resolve-ResumeOrRecover' = @{
+        Find    = "'3' { return [PSCustomObject]@{ Action='cancel'; Guid=`$null } }"
+        Replace = "'3' { return [PSCustomObject]@{ Action='fresh'; Guid=`$null } }" } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '3' }
+
+        $projDir = Join-Path $sandbox.Root 'lost3'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)) -Force | Out-Null
+
+        $r = Resolve-ResumeOrRecover 'dead0000-5555-6666-7777-888888888888' $projDir 'Lost Session' 100
+        Assert-Equal 'cancel' $r.Action 'cancel must mean cancel; nothing may be launched'
+    }
+
+Test-Case -Name 'Resolve-ResumeOrRecover rotates an existing recovery-prompt.md instead of overwriting it' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Get-SessionInfo','Sync-SessionIndex','Build-RecoveryMetaPrompt','Resolve-ResumeOrRecover') `
+    -Sabotage 'skip the rename, so generating a second recovery prompt destroys the first one the user may have already edited' `
+    -Mutate @{ 'Resolve-ResumeOrRecover' = @{
+        Find    = 'try { Rename-Item $primaryPath "recovery-prompt.md.old" -Force -ErrorAction Stop } catch {}'
+        Replace = '$null = $primaryPath' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '2' }
+        # $claudeExe already points at the stub via the harness prelude.
+
+        $projDir = Join-Path $sandbox.Root 'recov'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        # A recovery prompt the user has already been given, and may well have
+        # edited. Losing it silently is the failure this guards.
+        $primary = Join-Path $projDir 'recovery-prompt.md'
+        Set-Content $primary 'ORIGINAL RECOVERY PROMPT' -Encoding UTF8
+
+        $env:CLAUDECM_STUB_PJSON   = 'BRAND NEW RECOVERY PROMPT'
+        $env:CLAUDECM_STUB_PSID    = 'ffff0000-1111-2222-3333-444444444444'
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        try {
+            $null = Resolve-ResumeOrRecover 'dead1111-1111-2222-3333-444444444444' $projDir 'Recover Me' 100
+        } finally {
+            Remove-Item Env:CLAUDECM_STUB_PJSON, Env:CLAUDECM_STUB_PSID, Env:CLAUDECM_STUB_PROJDIR -ErrorAction SilentlyContinue
+        }
+
+        $rotated = Join-Path $projDir 'recovery-prompt.md.old'
+        Assert-True (Test-Path $rotated) `
+            'the previous recovery prompt must be kept as .old, not overwritten'
+        Assert-True ((Get-Content $rotated -Raw) -match 'ORIGINAL RECOVERY PROMPT') `
+            'the rotated file must hold the OLD content; rotating the new one over it would lose the same work'
+        Assert-True ((Get-Content $primary -Raw) -match 'BRAND NEW RECOVERY PROMPT') `
+            'the freshly generated prompt must land at recovery-prompt.md'
+    }
+
+Test-Case -Name 'Resolve-ResumeOrRecover deletes the throwaway transcript its own -p call created' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Get-SessionInfo','Sync-SessionIndex','Build-RecoveryMetaPrompt','Resolve-ResumeOrRecover') `
+    -Sabotage 'leave the primer transcript on disk, which turns every recovery attempt into a new orphan' `
+    -Mutate @{ 'Resolve-ResumeOrRecover' = @{
+        Find    = 'if (Test-Path $primerJsonl) { Remove-Item $primerJsonl -Force -ErrorAction SilentlyContinue }'
+        Replace = '$null = $primerJsonl' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '2' }
+        # $claudeExe already points at the stub via the harness prelude.
+
+        $projDir = Join-Path $sandbox.Root 'recov2'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        # Generating a recovery prompt runs `claude -p`, and that call creates a
+        # transcript of its own. It is nobody's session: it is never registered
+        # in sessions.txt, so if it is left behind the next launch greets the
+        # user with the orphan picker, caused by the recovery that was meant to
+        # help. The stub writes one precisely so this can be checked.
+        $primerSid = 'aaaa9999-1111-2222-3333-444444444444'
+        $env:CLAUDECM_STUB_PJSON   = 'RECOVERY TEXT'
+        $env:CLAUDECM_STUB_PSID    = $primerSid
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        try {
+            $null = Resolve-ResumeOrRecover 'dead2222-1111-2222-3333-444444444444' $projDir 'Recover Me Too' 100
+        } finally {
+            Remove-Item Env:CLAUDECM_STUB_PJSON, Env:CLAUDECM_STUB_PSID, Env:CLAUDECM_STUB_PROJDIR -ErrorAction SilentlyContinue
+        }
+
+        Assert-True (-not (Test-Path (Join-Path $keyDir "$primerSid.jsonl"))) `
+            'the primer transcript must be cleaned up, or recovery manufactures the orphans ClaudeCM exists to prevent'
+        Assert-True (Test-Path (Join-Path $projDir 'recovery-prompt.md')) `
+            'and the recovery prompt itself must still have been written'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #

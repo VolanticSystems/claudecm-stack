@@ -18,6 +18,45 @@
 #                           crash: spec 14.4 says detection must still work.
 #   CLAUDECM_STUB_TAIL      'exit' appends a trailing /exit command block, so
 #                           Test-CleanExitTail sees a clean exit.
+#
+# The headless path is separate, because `claude -p --output-format json` is a
+# different program shape: it reads a prompt on stdin, prints one JSON object on
+# stdout, and exits. Resolve-ResumeOrRecover uses it to generate a recovery
+# prompt, and then has to clean up after it.
+#
+#   CLAUDECM_STUB_PJSON     the text to report back as .result. Setting this at
+#                           all switches the stub into headless mode.
+#   CLAUDECM_STUB_PSID      session_id to report, AND the GUID of the throwaway
+#                           transcript the stub leaves in CLAUDECM_STUB_PROJDIR.
+#                           That litter is not incidental: a -p call really does
+#                           create a JSONL, and the caller really does have to
+#                           delete it or it becomes an orphan. A stub that
+#                           skipped it would make the cleanup untestable.
+#   CLAUDECM_STUB_PEMPTY    report a JSON object with no .result, which is what
+#                           a failed generation looks like.
+
+# Headless mode first: it returns, so nothing below it can run.
+if ($env:CLAUDECM_STUB_PJSON -or $env:CLAUDECM_STUB_PEMPTY) {
+    # Drain stdin. The caller pipes the meta-prompt in, and leaving it unread
+    # can surface as a broken pipe on the writing end.
+    $null = @($input)
+
+    $sid = $env:CLAUDECM_STUB_PSID
+    if ($sid -and $env:CLAUDECM_STUB_PROJDIR) {
+        if (-not (Test-Path $env:CLAUDECM_STUB_PROJDIR)) {
+            New-Item -ItemType Directory -Path $env:CLAUDECM_STUB_PROJDIR -Force | Out-Null
+        }
+        Set-Content -LiteralPath (Join-Path $env:CLAUDECM_STUB_PROJDIR "$sid.jsonl") `
+            -Value '{"type":"user","message":{"role":"user","content":"primer"}}' -Encoding UTF8
+    }
+
+    if ($env:CLAUDECM_STUB_PEMPTY) {
+        @{ session_id = $sid } | ConvertTo-Json -Compress
+    } else {
+        @{ result = $env:CLAUDECM_STUB_PJSON; session_id = $sid } | ConvertTo-Json -Compress
+    }
+    exit 0
+}
 
 $projDir = $env:CLAUDECM_STUB_PROJDIR
 $guid    = $env:CLAUDECM_STUB_GUID
