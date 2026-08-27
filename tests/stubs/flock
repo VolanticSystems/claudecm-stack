@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# flock shim, used ONLY when the real one is absent.
+#
+# Git Bash on Windows ships no flock, so __cm_acquire_lock spins its full
+# 50 x 0.2s retry and times out on EVERY sessions.txt write: ten seconds per
+# save, which made the suite unusable here. Real Linux has flock from
+# util-linux and the module lists it as a dependency, so the production path is
+# unaffected and is NOT what this stands in for.
+#
+# It grants the lock immediately. That is correct for this suite because no
+# test exercises contention; if one ever does, it must use the real flock and
+# skip where absent, not this.
+exit 0

@@ -1,0 +1,25 @@
+# Shell scripts MUST be stored and checked out with LF, always.
+#
+# This machine has core.autocrlf=true, so every .sh in this repo was being
+# committed with CRLF. Git Bash on Windows tolerates that, which is why it went
+# unnoticed for months; real Linux does not. A CRLF shebang makes the kernel
+# look for an interpreter literally named "bash\r" and the script dies with
+# "bad interpreter: No such file or directory". Sourced from .bashrc instead,
+# the \r becomes part of every token and you get syntax errors on lines that
+# look perfectly fine.
+#
+# claudecm-linux.sh is the module the Linux box actually runs. Do not let this
+# regress.
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# PowerShell is Windows-side and CRLF is correct for it.
+*.ps1   text eol=crlf
+*.psd1  text eol=crlf
+
+# Documents and config: normalise in the repo, let the platform decide locally.
+*.md    text
+*.json  text
+*.txt   text
+.gitattributes text eol=lf
+.gitignore     text eol=lf

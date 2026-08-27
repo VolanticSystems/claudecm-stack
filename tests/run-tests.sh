@@ -23,6 +23,19 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE="${MODULE:-$SCRIPT_DIR/../claudecm-linux.sh}"
 
+# Git Bash ships no flock, so __cm_acquire_lock spins its full 10-second retry
+# on EVERY sessions.txt write and the suite becomes unusable. Real Linux has it
+# from util-linux, which the module lists as a dependency, so this shim is only
+# ever reached on a box that is missing it. Announced rather than silent,
+# because "no flock" is itself worth knowing about a machine.
+if ! command -v flock >/dev/null 2>&1; then
+    echo "  note: no flock on PATH; using tests/stubs/flock so writes do not stall 10s each."
+    echo "        Real Linux has flock (util-linux). Contention is NOT covered by this suite."
+    chmod +x "$SCRIPT_DIR/stubs/flock" 2>/dev/null
+    PATH="$SCRIPT_DIR/stubs:$PATH"
+    export PATH
+fi
+
 if [[ ! -f "$MODULE" ]]; then
     echo "  module not found: $MODULE" >&2
     exit 2
@@ -493,6 +506,43 @@ t_sync_index_names_registered() {
         "spec 10 step 7: a registered session carries its sessions.txt name into the index"
 }
 
+t_format_date_short_year() {
+    local this_yr last_yr
+    this_yr=$(date +%Y)
+    last_yr=$(( this_yr - 1 ))
+    assert_eq "Mar 13" "$(__cm_format_date_short "$(date -d "$this_yr-03-13" +%s 2>/dev/null || date -j -f %Y-%m-%d "$this_yr-03-13" +%s)")" \
+        "spec 7: the current year is implied and omitted" || return 90
+    assert_eq "Mar 13, $last_yr" "$(__cm_format_date_short "$(date -d "$last_yr-03-13" +%s 2>/dev/null || date -j -f %Y-%m-%d "$last_yr-03-13" +%s)")" \
+        "spec 7: an older session must show its year, or two rows a year apart look identical"
+}
+
+t_get_archived_below_marker() {
+    printf 'aaa|/p|Live One|1\nbbb|/p|Live Two|2\n[archived]\nccc|/p|Old One|3\n' > "$__cm_sessions_file"
+    local n; n=$(__cm_get_archived | wc -l | tr -d ' ')
+    assert_eq "1" "$n" "only rows below the marker are archived" || return 90
+    local first; first=$(__cm_get_archived | head -1)
+    assert_true "$([[ "$first" == *"Old One"* ]] && echo 0 || echo 1)" \
+        "the archived row must be the one below the marker"
+}
+
+t_move_to_top_promotes() {
+    printf 'aaa|/p|First|1\nbbb|/p|Second|2\nccc|/p|Third|3\n' > "$__cm_sessions_file"
+    __cm_move_session_to_top "ccc" >/dev/null 2>&1
+    local rows; rows=$(__cm_get_sessions | wc -l | tr -d ' ')
+    assert_eq "3" "$rows" "promotion must not add or drop a row" || return 90
+    local first; first=$(__cm_get_sessions | head -1)
+    assert_true "$([[ "$first" == "ccc|"* ]] && echo 0 || echo 1)" "the promoted session must be row 1"
+}
+
+t_session_info_missing() {
+    mkdir -p "$HOME/infoproj"
+    __cm_get_session_info "deadbeef-0000-0000-0000-000000000000" "$HOME/infoproj" "155000"
+    assert_eq "(missing)" "${__cm_info_size:-}" \
+        "spec 8: a missing transcript must say so rather than showing a size" || return 90
+    assert_eq "155K tok" "${__cm_info_tokens:-}" \
+        "spec 8: the historical token count stays meaningful even when the file is gone"
+}
+
 t_orphan_scan_silent_when_tidy() {
     local pd; pd=$(_mk_project tidyproj)
     local a="aaaaaaaa-1111-1111-1111-111111111111"
@@ -675,6 +725,22 @@ test_case "sync_session_index drops entries whose transcript is gone (spec 10 st
 test_case "sync_session_index names a registered session from sessions.txt (spec 10 step 7)" \
     "always write an empty firstPrompt, so the resume picker shows an unnamed session" \
     "s@firstPrompt: r.desc || '',@firstPrompt: '',@" t_sync_index_names_registered
+
+test_case "format_date_short adds the year only for a previous year (spec 7)" \
+    "compare the wrong way round so this year gets a year stamp and last year does not" \
+    's|"\$file_year" -lt "\$now_year"|"$file_year" -gt "$now_year"|' t_format_date_short_year
+
+test_case "get_archived reads only below the [archived] marker (spec 5)" \
+    "emit every line rather than only those after the marker, so live sessions read as archived" \
+    's|(( in_arch )) \&\& printf|printf|' t_get_archived_below_marker
+
+test_case "move_session_to_top promotes without losing rows (spec 5)" \
+    "append the promoted session instead of prepending it, so the list is no longer most-recently-used" \
+    's|__cm_save_sessions "\$match" "\${rest\[@\]}"|__cm_save_sessions "${rest[@]}" "$match"|' t_move_to_top_promotes
+
+test_case "get_session_info marks a missing transcript and keeps its tokens (spec 8)" \
+    "report a missing transcript as a real size, so a lost session looks healthy in the list" \
+    's|__cm_info_size="(missing)"|__cm_info_size="0 B"|' t_session_info_missing
 
 test_case "do_orphan_scan stays silent when every transcript is accounted for" \
     "break the directory comparison so a correctly-registered transcript always looks foreign" \
