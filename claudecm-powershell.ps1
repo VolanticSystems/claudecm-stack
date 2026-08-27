@@ -1,4 +1,4 @@
-function claudecm {
+﻿function claudecm {
     $cmDir = "$env:USERPROFILE\.claudecm"
     $sessionsFile = "$cmDir\sessions.txt"
     $machineNameFile = "$cmDir\machine-name.txt"
@@ -24,23 +24,46 @@ function claudecm {
     function Ensure-CleanupPeriodDays {
         $settingsPath = "$env:USERPROFILE\.claude\settings.json"
         if (-not (Test-Path $settingsPath)) { return }
+
+        # Read first, on its own. An unreadable or non-JSON settings.json means
+        # change nothing and claim nothing: announcing protection for a file we
+        # could not even parse is a statement about nothing.
+        $settings = $null; $current = $null
         try {
-            $raw = Get-Content $settingsPath -Raw
-            $settings = $raw | ConvertFrom-Json
+            $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
             $current = $settings.cleanupPeriodDays
-            if (-not $current -or $current -lt 1000) {
-                # Back up
-                $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
-                $backupDir = "$env:USERPROFILE\.claudecm\backup"
-                if (-not (Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory -Force | Out-Null }
-                Copy-Item $settingsPath "$backupDir\settings.json.$ts" -ErrorAction SilentlyContinue
-                # Set to 100000 (preserves transcripts for ~274 years; NOT 0, which disables persistence)
-                $settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 100000 -Force
-                $settings | ConvertTo-Json -Depth 20 | Set-Content $settingsPath -Encoding UTF8
-                Write-Host "  Protected session transcripts from Claude Code's 30-day auto-delete." -ForegroundColor Cyan
-            }
-        } catch {
-            # Silent - never block ClaudeCM on settings issues
+        } catch { return }
+        if ($null -eq $settings) { return }
+
+        # 0 is not "keep forever", it disables persistence, so it falls through
+        # to the rewrite along with any value under 1000 and with the key being
+        # absent entirely.
+        if ($current -and $current -ge 1000) { return }
+
+        $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $backupDir = "$env:USERPROFILE\.claudecm\backup"
+        if (-not (Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory -Force | Out-Null }
+        Copy-Item $settingsPath "$backupDir\settings.json.$ts" -ErrorAction SilentlyContinue
+
+        # 100000 preserves transcripts for ~274 years. NOT 0, which disables
+        # persistence rather than extending it.
+        try {
+            $settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 100000 -Force
+            $settings | ConvertTo-Json -Depth 20 | Set-Content $settingsPath -Encoding UTF8 -ErrorAction Stop
+        } catch { }
+
+        # Read it back off DISK before saying anything. This message is the only
+        # thing the user ever sees about their transcripts being safe, so it has
+        # to be evidence that the write landed rather than the intention to
+        # write. Getting it wrong is silent: they are told they are protected,
+        # and a month later Claude Code deletes the transcripts anyway.
+        $after = $null
+        try { $after = (Get-Content $settingsPath -Raw | ConvertFrom-Json).cleanupPeriodDays } catch { }
+        if ($after -and $after -ge 1000) {
+            Write-Host "  Protected session transcripts from Claude Code's 30-day auto-delete." -ForegroundColor Cyan
+        } else {
+            Write-Host "  Warning: could not raise cleanupPeriodDays in settings.json." -ForegroundColor Yellow
+            Write-Host "  Transcripts remain subject to Claude Code's 30-day auto-delete."
         }
     }
     Ensure-CleanupPeriodDays

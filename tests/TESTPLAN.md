@@ -321,8 +321,8 @@ Useful switches: `-Only <substring>` / `ONLY=<substring>` to run one test,
 
 Current, as of 2026-08-27:
 
-    PowerShell   60 tests   60 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
-    bash         37 tests   37 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    PowerShell   62 tests   62 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    bash         40 tests   40 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
 
 Coverage is 32 of 32 PowerShell functions and 26 of 42 on bash, measured by
 asking which functions a test names rather than by estimating. Read the
@@ -398,11 +398,48 @@ up, which now exists.
    no CommonJS wrapper, so a top-level `return` is an Illegal return statement,
    and `2>/dev/null` hid the SyntaxError while the function returned 0.
 3. Every `.sh` in the repo was stored with CRLF, including the module itself.
-4. `__cm_ensure_cleanup_period_days` announces success without checking whether
-   it did anything. Found, not fixed: it is a product change and needs a
-   decision, so it is written up in `LINUX-HANDOVER.md` section 2c.
+4. `__cm_ensure_cleanup_period_days` announced success without checking whether
+   it did anything, and could not tell a failed read from an absent key, so a
+   file it had never parsed was backed up and rewritten anyway. Fixed in both
+   modules on 2026-08-27, with approval, and covered by three tests each.
+   Details in `LINUX-HANDOVER.md` section 2c.
+
+   The Windows-only trigger turned out not to be what it looked like. The
+   settings path was interpolated into the JavaScript source rather than passed
+   as an argument, and MSYS only translates a POSIX path to a Windows one when
+   it is an ARGUMENT to a native program. Inside a string literal it passes
+   through untouched, so node looked for `/tmp/...` on a Windows filesystem.
 
 Two of the four (2 and 4) are the same shape: a redirect hiding a fatal error
 on a call whose failure looks like success. Neither would have been found by
 reading the code, because both work perfectly when run any other way. That is
 the pattern worth grepping for elsewhere in the module.
+
+
+## 11. A sabotage has to model a wrong implementation, not just delete a line
+
+Two sabotages written on 2026-08-27 were no-ops, and the hollow detector caught
+both. They are worth recording because the mistake is easy to repeat and the
+resulting test looks perfectly reasonable.
+
+Both were against `ensure_cleanup_period_days`, where the rewritten code guards
+the same condition twice on purpose:
+
+    [[ -z "$current" || "$current" == "ERR" ]] && return 0
+    ...
+    [[ "$current" =~ ^[0-9]+$ ]] || return 0
+
+Deleting the first guard changes nothing, because `ERR` is not numeric and the
+second guard returns anyway. The PowerShell twin had the same shape: dropping
+`} catch { return }` changes nothing, because `if ($null -eq $settings)
+{ return }` follows it.
+
+The sabotage that works reinstates the OLD behaviour rather than removing a
+line: hand back an empty object, or set `current="NONE"`, so an unreadable file
+looks like one with the key absent. That is what the original code effectively
+did, and it is the wrong implementation the test needs to be able to detect.
+
+The same lesson in a different shape: the test asserting that protection is
+never claimed falsely has to force a real write failure with `chmod 444`.
+Without it the assertion is vacuously true on any box where the write succeeds,
+so the sabotage cannot be caught. Vacuous truth is the quietest form of hollow.
