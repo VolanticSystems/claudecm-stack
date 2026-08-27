@@ -11,13 +11,58 @@ to find out, and I would rather be corrected than agreed with.
 
 ---
 
+## 0. If you pulled this repo BEFORE 2026-08-27, delete it and clone again
+
+Everything below is secondary to this.
+
+`core.autocrlf=true` on this machine and no `.gitattributes` meant **every `.sh`
+in this repository was stored in git with CRLF**, `claudecm-linux.sh` included.
+So whatever you cloned before today, the module in it had a `\r` on the end of
+every line.
+
+On Windows that is invisible. Git Bash does not care and the suite ran green
+here for a full evening. On your box it is fatal and it fails in two different
+disguises:
+
+- **Executed:** the kernel reads the shebang literally and looks for an
+  interpreter named `bash\r`, so you get
+  `bad interpreter: No such file or directory` while staring at a line that
+  plainly says `#!/usr/bin/env bash`.
+- **Sourced from `.bashrc`:** no shebang involved, so instead the `\r` joins the
+  last token on every line. Errors land on syntax that is obviously correct.
+
+Fixed with a `.gitattributes` pinning `*.sh` to `eol=lf`, and the tree has been
+renormalised. Verified at the blob level rather than in the working copy,
+because the working copy is precisely what autocrlf rewrites on checkout:
+
+    git show ":claudecm-linux.sh" | file -    # want "ASCII text", NOT "with CRLF line terminators"
+
+A stale clone will not repair itself on `git pull`, because the file content
+does not change: only the attributes do. `git rm -r --cached . && git reset
+--hard`, or just re-clone. Re-cloning is faster than being unsure.
+
+I owe you this one plainly: I could have caught it any time by checking a blob
+instead of a working copy, and I did not, because everything I ran passed.
+
+---
+
 ## 1. Start here
 
     git pull
     bash tests/run-tests.sh
 
-Expected: `26 test(s): 26 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
-inconclusive`, and exit 0.
+Expected: `30 test(s): 30 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
+inconclusive`, and exit 0. Should take a few seconds.
+
+**If it takes minutes, you have no `flock`.** Git Bash ships none, and
+`__cm_acquire_lock` responds by spinning its full 50 x 0.2s retry and timing out
+on *every* `sessions.txt` write: ten seconds a save. The suite prints a note and
+falls back to `tests/stubs/flock` when the real one is missing, so on your box
+you should see neither. If you DO see that note, that is a finding about the
+machine worth acting on, because it means live ClaudeCM stalls ten seconds on
+every write and then proceeds unlocked anyway. `util-linux` provides it. The
+module has always listed it as a dependency and does not check for it at
+startup, which is arguably the actual defect.
 
 The suite is self-contained. It builds a sandbox per test, repoints `HOME` at
 it before sourcing the module, and deletes it afterwards. **It never touches
@@ -216,12 +261,28 @@ Anything that fails, obviously. Beyond that:
   this round: I reported `Invoke-FreshLaunchWithDetection` as missing from bash
   when the behaviour was present under a different name. **Check what the code
   does, not what it is called.**
-- Coverage is now 15 of 31 PowerShell functions, 48%, and bash mirrors the
-  whole of Tier 3. Everything that moves or deletes a transcript is guarded on
-  both sides. What is left untested is display helpers, the archive and edit
-  menus, and the two recovery paths (`Resolve-ResumeOrRecover`, `Do-Refresh`).
-  `Do-Refresh` pipes a large prompt over stdin and has its own history, so it
-  is the next one worth doing.
+- Coverage, measured rather than estimated: **21 of 32** PowerShell functions
+  are touched by at least one test, 66%. (34 `function` declarations minus
+  `grep` and `lst`, which are Bob's shell helpers that happen to live in the
+  same file.) Treat that as an upper bound: it counts a function as covered if
+  any test names it, and naming is not the same as asserting.
+
+  Eleven have no test at all, and they cluster honestly rather than randomly:
+
+      Do-Refresh              Resolve-ResumeOrRecover   Build-RecoveryMetaPrompt
+      Show-List               Do-EditList               Do-ViewArchived
+      Do-DeleteSession        Do-Resume                 Save-ArchivedSessions
+      Get-SessionDisplayName  Ensure-CleanupPeriodDays
+
+  Everything that moves or deletes a transcript IS guarded, on both sides. What
+  is missing is the interactive surface: the menus, and the two recovery paths.
+  Those are the hard ones precisely because they block on input, which is why
+  they are last and not first.
+
+  `Do-Refresh` is the one worth doing next. It pipes a large prompt over stdin,
+  it has a history of failing at realistic sizes and not at test sizes, and
+  Windows has a 32K argument limit sitting underneath it. Whatever you write for
+  it, make the fixture big. A small one will pass and prove nothing.
 
 Thanks. Genuinely: the Windows side has had a test suite for about a day, and
 half of what it found was wrong with the tests rather than the tool.

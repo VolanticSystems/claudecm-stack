@@ -318,3 +318,42 @@ touches real state: both build a sandbox per test and delete it afterwards.
 
 Useful switches: `-Only <substring>` / `ONLY=<substring>` to run one test,
 `-SkipSabotage` to run only the clean pass.
+
+Current, as of 2026-08-27:
+
+    PowerShell   33 tests   33 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    bash         30 tests   30 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+
+Coverage is 21 of 32 PowerShell functions, 66%, measured by asking which
+functions any test names rather than by estimating. That is an upper bound:
+naming a function is not the same as asserting on it. The eleven with no test
+are the interactive surface (`Show-List`, `Do-EditList`, `Do-ViewArchived`,
+`Do-DeleteSession`, `Do-Resume`, `Get-SessionDisplayName`), the archive writer
+(`Save-ArchivedSessions`), `Ensure-CleanupPeriodDays`, and the two recovery
+paths plus their prompt builder (`Resolve-ResumeOrRecover`, `Do-Refresh`,
+`Build-RecoveryMetaPrompt`).
+
+## 9. Two environment findings that are not product bugs
+
+Both cost real time, so they are written down rather than remembered.
+
+**Every `.sh` in this repo was stored with CRLF.** `core.autocrlf=true` and no
+`.gitattributes`. Git Bash tolerates it, so the suite ran green here all
+evening while the file that would land on Linux was broken: a CRLF shebang
+sends the kernel looking for an interpreter named `bash`. Now pinned by
+`.gitattributes` and the tree renormalised. The lesson is narrower than "check
+line endings": **the working copy is not what git stores.** Verify the blob,
+`git show ":path" | file -`, because the working copy is exactly what autocrlf
+rewrites on checkout, so looking there can never reveal the problem.
+
+**Git Bash ships no `flock`.** `__cm_acquire_lock` answers a missing `flock` by
+spinning its full 50 x 0.2s retry, so every `sessions.txt` write cost ten
+seconds and the suite looked like it was hanging. `tests/stubs/flock` stands in
+when the real one is absent and the suite says so out loud. Real Linux has it
+from util-linux and the module lists it as a dependency, so production is fine.
+
+Worth noting what this implies for a minimal container, though: no `flock`
+means every write stalls ten seconds and then proceeds *unlocked anyway*, which
+is the worst of both. The module never checks for it at startup. That is a
+plausible defect and is flagged in `LINUX-HANDOVER.md` rather than fixed here,
+because it is a product change and this sitting was about tests.
