@@ -157,10 +157,17 @@ sessions backups, the pre-trim transcript and the fork predecessor;
 as two variables and was right to. `do_trim` stopped hardcoding a second copy of
 the first path.
 
-**Spec 11.6.1(4) and 11.6.2(4)** both said "If exit code is 0 and
-`projDirClaude` exists". That contradicted 14.4 and both implementations.
-Gating detection on the exit code is the defect that made new sessions vanish
-unless the operator typed `/exit`. Corrected in both steps.
+**Spec 11.6.2(4)** said "If exit code is 0 and `projDirClaude` exists". That
+contradicted 14.4 and both implementations: gating NEW-SESSION REGISTRATION on
+the exit code is the defect that made sessions vanish unless the operator typed
+`/exit`. Corrected.
+
+**11.6.1(4) keeps its exit-code gate, deliberately.** I removed it there too at
+first and put it back the same day. 14.4 is scoped to new-session registration
+and names `Invoke-FreshLaunchWithDetection` explicitly. Fork detection is a
+different question: a resume that FAILED must not swap the registered GUID onto
+whatever transcript happens to be newest, which is the same adoption hazard as
+2b above. Both modules gate it and both are right to.
 
 ---
 
