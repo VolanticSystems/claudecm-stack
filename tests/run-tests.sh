@@ -759,6 +759,170 @@ test_case "orphan quarantine and trim backup remain two distinct directories" \
     "point the orphan scan at __cm_backup_dir, unifying the two destinations" \
     's/__cm_quarantine_root/__cm_backup_dir/g' t_backup_dirs_distinct
 
+# =============================================================================
+# Ported from the PowerShell suite. bash trails PowerShell and nothing notices
+# when it falls further behind, so these mirror the sabotages that catch actual
+# loss of work rather than the ones that catch cosmetics.
+#
+# The interactive functions are driven with a here-string. `read -r cmd` takes
+# one line per call, so the sequence below is literally what a person would
+# type, ending in Q so the loop terminates rather than reading EOF forever.
+# =============================================================================
+
+t_save_archived_marker() {
+    printf 'live|/p|Still Working|10\n' > "$__cm_sessions_file"
+    __cm_save_archived 'arch|/p|Done With This|20' >/dev/null 2>&1
+    # The marker is the only thing separating the two lists. Without it the
+    # archived rows parse as ordinary sessions and reappear in the menu, which
+    # undoes the archiving entirely.
+    local live; live=$(__cm_get_sessions | wc -l | tr -d ' ')
+    assert_eq "1" "$live" "an archived session must not come back as a live one" || return 90
+    local arch; arch=$(__cm_get_archived | wc -l | tr -d ' ')
+    assert_eq "1" "$arch" "the archived session must be readable back out of the archive"
+}
+
+t_delete_session_removes_sidecar() {
+    local dir="$HOME/delproj"; mkdir -p "$dir"
+    local key; key=$(__cm_get_proj_key "$dir")
+    local keydir="$HOME/.claude/projects/$key"; mkdir -p "$keydir"
+    local guid="eeee-1111"
+    printf '{"type":"user"}\n' > "$keydir/$guid.jsonl"
+    # Claude Code keeps per-session sidecar state next to the transcript. A
+    # delete that takes the transcript and leaves this behind is the kind of
+    # half-delete that looks fine until the directory is full of them.
+    mkdir -p "$keydir/$guid"; printf 'residue\n' > "$keydir/$guid/shell-snapshot.txt"
+    printf 'keep-1111|%s|Keep Me|5\n' "$dir" > "$__cm_sessions_file"
+    printf '{"type":"user"}\n' > "$keydir/keep-1111.jsonl"
+
+    __cm_do_delete_session "$guid" "$dir" >/dev/null 2>&1
+
+    assert_true "$([[ ! -f "$keydir/$guid.jsonl" ]] && echo 0 || echo 1)" \
+        "the transcript must be gone: this is the destructive delete, not archive" || return 90
+    assert_true "$([[ ! -d "$keydir/$guid" ]] && echo 0 || echo 1)" \
+        "the per-GUID sidecar directory must go with it, or the delete is only half done" || return 90
+    assert_true "$([[ -f "$keydir/keep-1111.jsonl" ]] && echo 0 || echo 1)" \
+        "deleting one session must not touch any other session in the same project"
+}
+
+t_cleanup_period_backs_up_first() {
+    mkdir -p "$HOME/.claude"
+    # 30 is Claude Code's own default and it is what silently deletes month-old
+    # transcripts.
+    printf '{"cleanupPeriodDays":30,"theme":"dark"}
+' > "$HOME/.claude/settings.json"
+
+    __cm_ensure_cleanup_period_days >/dev/null 2>&1
+
+    # DELIBERATELY not asserting on cleanupPeriodDays itself.
+    #
+    # Reading it back needs node, and under Git Bash node cannot open the POSIX
+    # path this sandbox lives at, so the product's own node calls fail there
+    # too. On that box the assertion could not bind no matter what the product
+    # did, and a test that cannot bind is worse than no test. The value
+    # assertion is handed to the Linux box in LINUX-HANDOVER.md instead.
+    #
+    # The backup is pure shell, so it binds everywhere, and it guards the part
+    # that is irreversible: this function REWRITES the user's settings.json,
+    # and eating a config while protecting transcripts is a poor trade.
+    local n; n=$(ls -1 "$__cm_backup_dir"/settings.json.* 2>/dev/null | wc -l | tr -d ' ')
+    assert_true "$([[ "$n" -ge 1 ]] && echo 0 || echo 1)"         "settings.json must be copied to the backup before it is rewritten; found $n backups"
+}
+
+t_mtime_epoch_is_an_epoch() {
+    # The Linux handover flags this helper as the thing I could least verify
+    # from Windows: it is stat -c %Y with a stat -f %m fallback, and I have
+    # never watched it run against GNU coreutils on a real box. This test asks
+    # the box itself rather than asking me.
+    local f="$HOME/mtime-probe.txt"
+    printf 'x\n' > "$f"
+    local got; got=$(__cm_file_mtime_epoch "$f")
+    local now; now=$(date +%s)
+    assert_true "$([[ "$got" =~ ^[0-9]+$ ]] && echo 0 || echo 1)" \
+        "mtime must be a bare epoch integer, got [$got]" || return 90
+    # A file written a moment ago. Anything outside a day of now means the
+    # helper returned something that is not an mtime: a size, a ctime in
+    # different units, or nothing at all.
+    assert_true "$(( got > now - 86400 && got < now + 86400 ? 0 : 1 ))" \
+        "mtime [$got] must be within a day of now [$now]; a wrong unit here silently picks the wrong session in the multi-file tiebreak"
+}
+
+t_show_list_numbers_from_one() {
+    printf 'aaa|/p|First Thing|10\nbbb|/p|Second Thing|20\n' > "$__cm_sessions_file"
+    local out; out=$(__cm_show_list 2>&1)
+    assert_true "$(printf '%s' "$out" | grep -qE '^[[:space:]]+1\.' && echo 0 || echo 1)" \
+        "the first session must be numbered 1: every selection path indexes off the number printed here" || return 90
+    assert_true "$(printf '%s' "$out" | grep -qE '^[[:space:]]+0\.' && echo 1 || echo 0)" \
+        "there is no session 0; a zero-based display makes the whole list off by one" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Second Thing' && echo 0 || echo 1)" \
+        "every session must appear"
+}
+
+t_view_archived_delete_needs_the_word() {
+    local dir="$HOME/archproj"; mkdir -p "$dir"
+    local key; key=$(__cm_get_proj_key "$dir")
+    local keydir="$HOME/.claude/projects/$key"; mkdir -p "$keydir"
+    local guid="5555-ffff"
+    printf '{"type":"user"}\n' > "$keydir/$guid.jsonl"
+    printf 'live-6666|%s|Live One|5\n[archived]\n%s|%s|Old But Wanted|50\n' "$dir" "$guid" "$dir" > "$__cm_sessions_file"
+
+    # 'yes' is exactly what a person types on autopilot after a day of y/N
+    # prompts. The prompt asks for the word delete, and that word is the only
+    # thing between a keystroke and an unrecoverable loss.
+    __cm_do_view_archived >/dev/null 2>&1 <<< $'D1\nyes\nQ\nQ'
+
+    assert_true "$([[ -f "$keydir/$guid.jsonl" ]] && echo 0 || echo 1)" \
+        "answering anything other than the word delete must leave the conversation on disk" || return 90
+    local arch; arch=$(__cm_get_archived | wc -l | tr -d ' ')
+    assert_eq "1" "$arch" "and the archive entry must remain"
+}
+
+t_edit_list_archive_moves_not_drops() {
+    local dir="$HOME/editproj"; mkdir -p "$dir"
+    printf 'aaa|%s|Put Me Away|5\nbbb|%s|Keep Me Live|6\n' "$dir" "$dir" > "$__cm_sessions_file"
+
+    __cm_do_edit_list >/dev/null 2>&1 <<< $'A1\nQ\nQ'
+
+    # Archive is the NON-destructive counterpart to delete, so the failure that
+    # matters is not "it stayed visible", it is "it went nowhere": removed from
+    # one list without arriving in the other, leaving the transcript on disk
+    # with nothing referencing it. That is the orphan state exactly.
+    local live; live=$(__cm_get_sessions | wc -l | tr -d ' ')
+    assert_eq "1" "$live" "the archived session must leave the live list" || return 90
+    local arch; arch=$(__cm_get_archived | wc -l | tr -d ' ')
+    assert_eq "1" "$arch" "and it must ARRIVE in the archive; removed from one list without reaching the other is a silent loss" || return 90
+    local first; first=$(__cm_get_archived | head -1)
+    assert_true "$([[ "$first" == *"Put Me Away"* ]] && echo 0 || echo 1)" \
+        "and it must be the one that was chosen"
+}
+
+test_case "save_archived writes the [archived] marker" \
+    "stop emitting the marker, so archived rows are written straight into the live list" \
+    "s@printf '\[archived\]@printf 'NOTAMARKER@" t_save_archived_marker
+
+test_case "do_delete_session removes the transcript AND its sidecar directory" \
+    "skip the recursive removal of the per-GUID sidecar directory, leaving state behind after a delete reported as complete" \
+    's@\[\[ -d "\$proj_dir/\$guid" \]\] && rm -rf "\$proj_dir/\$guid"@:@' t_delete_session_removes_sidecar
+
+test_case "ensure_cleanup_period_days backs up settings.json before rewriting it" \
+    "skip the backup copy, so a rewrite that goes wrong takes the user settings with it" \
+    's@cp -f "$settings" "$__cm_backup_dir/settings.json.$ts"@:@' t_cleanup_period_backs_up_first
+
+test_case "file_mtime_epoch returns a real epoch on this box" \
+    "return the file SIZE instead of its mtime, on both the GNU and the BSD branch" \
+    's@stat -c %Y@stat -c %s@; s@stat -f %m@stat -f %z@' t_mtime_epoch_is_an_epoch
+
+test_case "show_list numbers sessions from 1" \
+    "number the list from 0, so every number shown is one off from the number the code accepts" \
+    's@local num="\$i\."@local num="$((i-1))."@' t_show_list_numbers_from_one
+
+test_case "a permanent delete needs the word delete, not any confirmation" \
+    "accept any answer as confirmation, so an absent-minded yes destroys a conversation permanently" \
+    's@if \[\[ "\${confirm,,}" == "delete" \]\]; then@if true; then@' t_view_archived_delete_needs_the_word
+
+test_case "archiving moves a session to the archive rather than dropping it" \
+    "remove the session from the live list without adding it to the archive, deleting it from the tool while orphaning the transcript" \
+    's@archived+=("\$entry")@:@' t_edit_list_archive_moves_not_drops
+
 echo ""
 TOTAL=$((PASS+FAIL+HOLLOW+STALE+ERROR+INCONC))
 echo "  $TOTAL test(s): $PASS pass, $FAIL fail, $ERROR error, $HOLLOW hollow, $STALE stale-sabotage, $INCONC inconclusive"

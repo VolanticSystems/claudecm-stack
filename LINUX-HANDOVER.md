@@ -51,7 +51,7 @@ instead of a working copy, and I did not, because everything I ran passed.
     git pull
     bash tests/run-tests.sh
 
-Expected: `30 test(s): 30 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
+Expected: `37 test(s): 37 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
 inconclusive`, and exit 0. Should take a few seconds.
 
 **If it takes minutes, you have no `flock`.** Git Bash ships none, and
@@ -141,6 +141,54 @@ took `head -1` of a **sorted** list, which is first alphabetically and has
 nothing to do with which session is ours. It now compares mtimes across the new
 set only, using the existing `__cm_file_mtime_epoch` helper.
 
+### 2c. A bug I found and did NOT fix, because it needs Bob's say-so
+
+`__cm_ensure_cleanup_period_days` **announces success without checking whether
+it did anything.** The structure is:
+
+```bash
+current=$("$node" -e "...read cleanupPeriodDays..." 2>/dev/null)
+if [[ -z "$current" ]] || (( current < 1000 )); then
+    cp -f "$settings" "$__cm_backup_dir/settings.json.$ts" 2>/dev/null
+    "$node" -e "...write cleanupPeriodDays=100000..." 2>/dev/null
+    __cm_say_c "$__CM_C_CYAN" "Protected session transcripts from ... auto-delete."
+fi
+```
+
+Every node call is silenced and the message is printed unconditionally. If the
+write fails for any reason the user is told their transcripts are protected
+while `cleanupPeriodDays` is still 30, and Claude Code deletes them a month
+later. Note also that a FAILED read produces an empty `current`, which the guard
+treats as "needs fixing" and proceeds, so a broken read and a genuinely low
+value are indistinguishable.
+
+I watched it do exactly this. Under Git Bash the function printed its success
+line and left `settings.json` byte-for-byte unchanged.
+
+**The trigger I saw is Windows-only** and you will not hit it: node on Windows
+cannot open the POSIX sandbox path that Git Bash hands it. On your box node
+reads `/home/...` perfectly well, so the function almost certainly works. The
+unconditional message is a real defect regardless of what triggers it, and it is
+the same shape as 2a: `2>/dev/null` on a call whose failure looks like success.
+
+Not fixed here. It is a product change rather than a test, so it is Bob's call.
+The fix is small: read the value back after writing and only announce if it
+actually changed.
+
+**One test is therefore weaker than it looks.**
+`ensure_cleanup_period_days backs up settings.json before rewriting it` asserts
+only the backup, which is pure shell and binds everywhere. It deliberately does
+NOT assert the resulting `cleanupPeriodDays`, because reading it back needs node
+and on Git Bash that assertion could not bind no matter what the product did. A
+test that cannot bind is worse than no test. **Please add the value assertion on
+your side**, where it means something:
+
+```bash
+val=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')).cleanupPeriodDays))")
+# must be >= 1000, and must NEVER be 0: the code comments explain that 0
+# disables persistence rather than extending it
+```
+
 ---
 
 ## 3. What I could NOT verify, ranked by how likely I am to be wrong
@@ -153,6 +201,14 @@ your time.
    rather than inventing a second one, but I have never seen it run against GNU
    coreutils on a real box. If `stat -c` behaves differently for you than I
    assumed, the multi-file tiebreak picks the wrong session.
+
+   **Now partly self-answering.** `file_mtime_epoch returns a real epoch on this
+   box` writes a file, reads its mtime back, and asserts the result is a bare
+   integer within a day of `date +%s`. Its sabotage swaps BOTH branches to
+   report the file SIZE instead, so the GNU path cannot quietly fall through to
+   the BSD one and pass anyway. If that test goes green on your machine, this
+   item is closed; if it goes red, it tells you the units directly. It is the
+   one item on this list that no longer needs you to reason about it.
 
 2. **`shellcheck`.** Not installed on this machine, so the bash changes have
    had `bash -n` and the suite and nothing else. If you have shellcheck, run it
@@ -261,28 +317,53 @@ Anything that fails, obviously. Beyond that:
   this round: I reported `Invoke-FreshLaunchWithDetection` as missing from bash
   when the behaviour was present under a different name. **Check what the code
   does, not what it is called.**
-- Coverage, measured rather than estimated: **21 of 32** PowerShell functions
-  are touched by at least one test, 66%. (34 `function` declarations minus
+- Coverage, measured rather than estimated: **32 of 32** PowerShell functions
+  are touched by at least one test, and **26 of 42** on bash, 61%. (34 `function` declarations minus
   `grep` and `lst`, which are Bob's shell helpers that happen to live in the
   same file.) Treat that as an upper bound: it counts a function as covered if
   any test names it, and naming is not the same as asserting.
 
-  Eleven have no test at all, and they cluster honestly rather than randomly:
+  PowerShell is done. bash is where the gap is now, and it is a real one: the
+  sixteen without tests are
 
-      Do-Refresh              Resolve-ResumeOrRecover   Build-RecoveryMetaPrompt
-      Show-List               Do-EditList               Do-ViewArchived
-      Do-DeleteSession        Do-Resume                 Save-ArchivedSessions
-      Get-SessionDisplayName  Ensure-CleanupPeriodDays
+      __cm_do_resume            __cm_do_refresh          __cm_do_post_exit
+      __cm_resolve_resume_or_recover                     __cm_build_recovery_meta_prompt
+      __cm_acquire_lock         __cm_release_lock        __cm_auto_backup_sessions
+      __cm_resolve_node         __cm_resolve_jq          __cm_find_exe
+      __cm_json_get             __cm_file_size           __cm_file_ctime_epoch
+      __cm_say_c                __cm_blank
 
-  Everything that moves or deletes a transcript IS guarded, on both sides. What
-  is missing is the interactive surface: the menus, and the two recovery paths.
-  Those are the hard ones precisely because they block on input, which is why
-  they are last and not first.
+  The last two are cosmetic. The first five are not: they are the resume path,
+  the refresh path, and post-exit registration, which between them decide
+  whether a session survives. Their PowerShell twins all have tests now, so the
+  sabotages are written and only need porting. That is the most useful thing you
+  could do with this suite.
 
-  `Do-Refresh` is the one worth doing next. It pipes a large prompt over stdin,
-  it has a history of failing at realistic sizes and not at test sizes, and
-  Windows has a 32K argument limit sitting underneath it. Whatever you write for
-  it, make the fixture big. A small one will pass and prove nothing.
+  `__cm_do_refresh` is the one to do first, and there is a specific trap in it.
+  Its PowerShell twin pipes a large prompt over stdin instead of passing it as
+  an argument, because Windows caps a command line near 32K and a refresh prompt
+  carrying a skeleton goes well past it. That bug is correct on every small
+  input and broken on every real one, which is how it survived long enough to
+  cost a day. Linux's limit is far higher so you may never hit it, but the test
+  is still worth porting: `tests/stubs/extract-skeleton.mjs` already emits an
+  80KB skeleton, and the claude stub already records how many characters
+  actually arrived on stdin. **Make the fixture big.** A small one passes and
+  proves nothing.
 
-Thanks. Genuinely: the Windows side has had a test suite for about a day, and
-half of what it found was wrong with the tests rather than the tool.
+Thanks. The Windows side has had a test suite for about a day, and most of what
+it found was wrong with the TESTS rather than the tool. Three that are worth
+knowing about, because they are the failure modes to expect in anything you add:
+
+- A mutation applied with PowerShell's `-replace` spliced whole functions into
+  themselves, because `$_` there means the entire input string. Two tests passed
+  for the wrong reason.
+- The harness imposed `Set-StrictMode` and `set -u`, which the product sets
+  neither of. That is not testing the program anyone runs.
+- Two assertions were written as `@(Get-Sessions).Count`. Spec 14.3: the
+  function comma-returns so the array survives unrolling, which means `@()`
+  around it nests it and `.Count` is 1 forever. Neither assertion could fail.
+  There is now a structural check that refuses the idiom outright.
+
+The last one is the one I would watch for. It is not a wrong test, it is a test
+that LOOKS like coverage, and no per-test sabotage finds it because the fault is
+in the assertion rather than in the product.
