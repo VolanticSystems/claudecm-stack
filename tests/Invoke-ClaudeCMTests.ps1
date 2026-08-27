@@ -1628,6 +1628,140 @@ Test-Case -Name 'unarchiving moves a session across, it does not copy it' `
             'it must LEAVE the archive: a session listed in both places is one session wearing two numbers, and archiving it again would not remove it'
     }
 
+# -----------------------------------------------------------------------------
+# Do-EditList. Five sub-commands, three of which can lose a session.
+# -----------------------------------------------------------------------------
+
+Test-Case -Name 'Do-EditList renames a session in place' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Do-DeleteSession','Do-EditList') `
+    -Sabotage 'accept the new name and discard it, so the rename appears to work and is gone next time the list is drawn' `
+    -Mutate @{ 'Do-EditList' = @{
+        Find = '$sessions[$idx].Desc = $newName'; Replace = '$null = $newName' } } `
+    -Body {
+        Use-Answers @('R1', 'Renamed Thing', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        Set-Content $sessionsFile @(
+            "1111bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Original Name|5",
+            "2222bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Other|6") -Encoding UTF8
+
+        $null = (Do-EditList 6>&1)
+
+        $after = Get-Sessions
+        Assert-Equal 'Renamed Thing' $after[0].Desc 'the rename must be persisted, not just echoed'
+        Assert-Equal 'Other' $after[1].Desc 'and it must not touch any other session'
+    }
+
+Test-Case -Name 'archiving moves a session to the archive rather than dropping it' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Do-DeleteSession','Do-EditList') `
+    -Sabotage 'remove the session from the live list without adding it to the archive, which deletes it from the tool while leaving the transcript orphaned on disk' `
+    -Mutate @{ 'Do-EditList' = @{
+        Find = '$archived = @($archived) + @($entry)'; Replace = '$archived = @($archived)' } } `
+    -Body {
+        # Archive is the non-destructive counterpart to delete, so the failure
+        # that matters is not "it stayed visible", it is "it went nowhere". The
+        # transcript would still be on disk, unreferenced, which is precisely
+        # the orphan state the orphan scanner exists to complain about.
+        Use-Answers @('A1', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        Set-Content $sessionsFile @(
+            "3333bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Put Me Away|5",
+            "4444bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Keep Me Live|6") -Encoding UTF8
+
+        $null = (Do-EditList 6>&1)
+
+        Assert-Equal 1 (Get-Sessions).Count 'the archived session must leave the live list'
+        Assert-Equal 1 (Get-ArchivedSessions).Count `
+            'and it must ARRIVE in the archive; removed from one list without reaching the other is a silent loss'
+        Assert-Equal 'Put Me Away' (Get-ArchivedSessions)[0].Desc 'and it must be the one that was chosen'
+    }
+
+Test-Case -Name 'Do-EditList refuses to repoint a session at a path that does not exist' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Do-DeleteSession','Do-EditList') `
+    -Sabotage 'drop the existence check, so a typo silently repoints the session at a directory that is not there' `
+    -Mutate @{ 'Do-EditList' = @{
+        Find = 'if (-not (Test-Path $newPath)) {'; Replace = 'if ($false) {' } } `
+    -Body {
+        Use-Answers @('P1', 'C:\definitely\not\a\real\directory\xyzzy', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        $orig = Join-Path $sandbox.Root 'origproj'
+        New-Item -ItemType Directory -Path $orig -Force | Out-Null
+        Set-Content $sessionsFile "5555bbbb-aaaa-2222-3333-444444444444|$orig|Path Test|5" -Encoding UTF8
+
+        $null = (Do-EditList 6>&1)
+
+        # The path decides the project key, which decides where the transcript
+        # is looked for. Accepting one that does not exist does not fail loudly;
+        # it makes the session unresumable at the next attempt instead.
+        Assert-Equal $orig (Get-Sessions)[0].Dir `
+            'a path that does not exist must be rejected and the session left pointing where it was'
+    }
+
+Test-Case -Name 'repointing a session copies its transcript to the new project key' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Do-DeleteSession','Do-EditList') `
+    -Sabotage 'change the recorded path without copying the transcript, leaving the session pointing at a project directory that has no conversation in it' `
+    -Mutate @{ 'Do-EditList' = @{
+        Find = 'Copy-Item $oldFile $newFile'; Replace = '$null = $newFile' } } `
+    -Body {
+        $orig = Join-Path $sandbox.Root 'fromproj'
+        $dest = Join-Path $sandbox.Root 'toproj'
+        New-Item -ItemType Directory -Path $orig -Force | Out-Null
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+        Use-Answers @('P1', $dest, 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        $guid = '6666bbbb-aaaa-2222-3333-444444444444'
+        $oldKeyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $orig)
+        New-Item -ItemType Directory -Path $oldKeyDir -Force | Out-Null
+        Set-Content (Join-Path $oldKeyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$guid|$orig|Moving House|5" -Encoding UTF8
+
+        $null = (Do-EditList 6>&1)
+
+        # The project key is derived from the path, so changing the path alone
+        # points the session at a key directory that has never held its
+        # transcript. The row would look right and the resume would find nothing.
+        $newKeyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $dest)
+        Assert-True (Test-Path (Join-Path $newKeyDir "$guid.jsonl")) `
+            'the transcript must be copied to the new project key, or the repointed session has no conversation to resume'
+        Assert-Equal $dest (Get-Sessions)[0].Dir 'and the row must record the new path'
+    }
+
+Test-Case -Name 'Do-EditList moves a session to the requested position' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Save-ArchivedSessions','Sync-SessionIndex','Get-SessionInfo','Do-DeleteSession','Do-EditList') `
+    -Sabotage 'always reinsert at the top regardless of the destination, so M#,# becomes bump-to-top and cannot reorder anything' `
+    -Mutate @{ 'Do-EditList' = @{
+        Find = '$list.Insert($to, $item)'; Replace = '$list.Insert(0, $item)' } } `
+    -Body {
+        # M1,3 moves the FIRST item to third place. A sabotage that always
+        # inserts at 0 puts it straight back where it started, so the list is
+        # unchanged: the assertion has to compare the whole order, not just
+        # check that something moved.
+        Use-Answers @('M1,3', 'Q', 'Q')
+        function Read-Host { param([string]$Prompt)
+            $a = $script:__ans[$script:__ansIdx]; $script:__ansIdx++; $a }
+
+        Set-Content $sessionsFile @(
+            "7777bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Alpha|1",
+            "8888bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Beta|2",
+            "9999bbbb-aaaa-2222-3333-444444444444|$($sandbox.Root)|Gamma|3") -Encoding UTF8
+
+        $null = (Do-EditList 6>&1)
+
+        $after = Get-Sessions
+        Assert-Equal 3 $after.Count 'reordering must not add or lose a session'
+        Assert-Equal 'Beta'  $after[0].Desc 'Beta moves up to first'
+        Assert-Equal 'Gamma' $after[1].Desc 'Gamma moves up to second'
+        Assert-Equal 'Alpha' $after[2].Desc 'and Alpha lands in third, where it was sent'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #
