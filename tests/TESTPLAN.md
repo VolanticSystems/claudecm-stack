@@ -3,9 +3,10 @@
 First test suite for a project that had none, at 3,303 lines across two
 implementations after five months of daily use.
 
-Written 2026-08-26. Informed by a TheRegents `outline` panel (13 models,
-medium bench, $0.2092) over `claudecm-powershell.ps1` plus the spec, and by
-direct reading of both modules.
+Written 2026-08-26. Informed by an adversarial model panel run over
+`claudecm-powershell.ps1` plus the spec, and by direct reading of both modules.
+The write-up of that panel round is feedback on a separate, unpublished tool and
+lives with that tool, not here.
 
 ---
 
