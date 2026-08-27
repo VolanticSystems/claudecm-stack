@@ -131,16 +131,20 @@ quarantine action mutates disk and belongs in Tier 3 rather than here.
 
 ## 4. What is implemented, and what each test guards
 
-37 tests: 20 PowerShell, 17 bash. The Tier 0 to 2 tests are deliberately
+44 tests: 27 PowerShell, 17 bash. The Tier 0 to 2 tests are deliberately
 mirrored so divergence shows up as a different result on the same named test.
-Tier 3 now exists on both platforms.
+Tier 3 exists on both platforms and is deeper on PowerShell.
 
-**Behavioural coverage: 10 of 31 PowerShell functions, 32%.** Of the six
-functions the panel most often proposed testing, three are now covered
-(`Invoke-FreshLaunchWithDetection`, `Get-Sessions`, `Write-SessionsAtomic`) and
-three are not (`Do-Trim`, `Do-OrphanScan`, `Invoke-ResumeWithForkDetection`).
-Stating the number rather than the test count, because 33 green tests over the
-cheap third of the module would otherwise read as more assurance than it is.
+**Behavioural coverage: 14 of 31 PowerShell functions, 45%**, up from 22% when
+the suite was first written. **All six** of the functions the panel most often
+proposed testing are now covered.
+
+More usefully: every function that MOVES OR DELETES a transcript now has a
+behavioural test with a named product edit that makes it fail. That is
+`Do-Trim`, `Do-OrphanScan`, `Invoke-ResumeWithForkDetection`,
+`Invoke-FreshLaunchWithDetection` and `Do-PostExit`. The untested 17 are
+display helpers, the archive and edit menus, `Sync-SessionIndex`, and the two
+recovery paths: things that would annoy rather than destroy.
 
 | test | spec | sabotage that proves it can fail |
 |---|---|---|
@@ -165,8 +169,15 @@ cheap third of the module would otherwise read as more assurance than it is.
 | a launch producing no transcript adopts nothing (bash) | 11.6.2 | make `comm` treat pre-existing files as new |
 | the module never spawns powershell.exe | n/a | point Start-Process back at powershell.exe |
 | the harness supplies every enclosing-scope variable it lifts | n/a | have the product read an undefined enclosing name |
+| `Do-Trim` files the pre-trim transcript to the backup | 11.13 s11 | delete the Move-Item |
+| `Do-Trim` swaps the GUID onto the row and keeps the name | 11.13 | skip the GUID assignment |
+| a forked resume follows the fork and files the predecessor | 11.6.1 | delete the predecessor Move-Item |
+| a resume that did NOT fork changes nothing | 11.6.1 | treat the newest transcript as a fork unconditionally |
+| `Do-OrphanScan` stays silent when nothing is wrong | 14.3 | make the directory comparison always disagree |
+| `Do-OrphanScan` quarantines to the quarantine root | 3.1 | send it to the trim backup instead |
+| `Do-OrphanScan` refuses to quarantine the registered session | 11.5 | remove the guard |
 
-**Status: 37 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0 inconclusive.**
+**Status: 44 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0 inconclusive.**
 
 The last three are Tier 2b: whole-module integration through the `claudecm`
 entry point. They exist because the `-s` dispatch lives inside `claudecm`
@@ -283,18 +294,19 @@ trails PowerShell and nothing currently notices when it falls further behind.
 
 1. ~~Stub `claude`~~ done: `tests/stubs/claude-stub.ps1`.
 2. ~~`Do-PostExit` and spec 14.4 exit-code independence~~ done.
-3. `Do-Trim` quarantine of the pre-trim file, spec 11.13 step 11. Omitting it
-   caused the April 2026 orphan accumulation. Needs a cmv stub, because trim
-   only happens if cmv runs.
-4. `Invoke-ResumeWithForkDetection` fork swap and predecessor quarantine, spec
-   11.6.1. The claude stub already covers what this needs.
-5. `Do-OrphanScan` quarantine, which mutates disk and needs stdin injection.
-6. `Sync-SessionIndex` against a hand-written expected index. The oracle must
+3. ~~`Do-Trim` quarantine of the pre-trim file~~ done, with `stubs/cmv-stub.ps1`.
+4. ~~`Invoke-ResumeWithForkDetection`~~ done, both the fork and the no-fork case.
+5. ~~`Do-OrphanScan`~~ done. It needed no stdin injection: shadowing `Read-Host`
+   inside the test body reaches it, the same seam `Do-PostExit` uses.
+6. ~~Tier 3 on bash~~ done, two cases.
+7. ~~Seam fidelity~~ answered, see section 2.
+8. `Sync-SessionIndex` against a hand-written expected index. The oracle must
    be hand-built: regenerating it with the same function would bind nothing.
-7. Port Tier 3 to bash, which currently has none.
-8. **The differential seam test.** Run the same function in place inside
-   `claudecm` and lifted into the harness, feed both identical inputs, compare.
-   Promoted after the StrictMode finding proved the seam was NOT faithful.
+   This is the largest remaining single function.
+9. `Resolve-ResumeOrRecover` and `Do-Refresh`, the two recovery paths. Both
+   spawn children and `Do-Refresh` pipes a large prompt over stdin, which has
+   its own history (the Windows 32K argument limit).
+10. Mirror the deeper Tier 3 cases onto bash. PowerShell has seven, bash two.
 
 ## 8. Running them
 
