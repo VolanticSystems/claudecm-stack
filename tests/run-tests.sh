@@ -346,6 +346,203 @@ t_launch_detects_after_nonzero_exit() {
     assert_eq "130" "${__cm_launch_exit:-}" "the exit code itself must still be reported"
 }
 
+_use_cmv_stub() {
+    __CM_TEST_CMV="$SCRIPT_DIR/stubs/cmv-stub.sh"
+    chmod +x "$__CM_TEST_CMV" 2>/dev/null
+    __cm_resolve_cmv() { printf '%s\n' "$__CM_TEST_CMV"; }
+    [[ -x "$(__cm_resolve_cmv)" ]] || { echo "           cmv stub not executable" >&2; return 90; }
+}
+
+# Builds a project dir plus its key dir, and echoes the key dir.
+_mk_project() {
+    local name="$1" projdir="$HOME/$1" pk pd
+    mkdir -p "$projdir"
+    pk=$(__cm_get_proj_key "$projdir"); pd="$HOME/.claude/projects/$pk"
+    mkdir -p "$pd"
+    printf '%s\n' "$pd"
+}
+
+t_trim_files_pretrim() {
+    _use_cmv_stub || return 90
+    local pd; pd=$(_mk_project trimproj)
+    local old="11111111-1111-1111-1111-111111111111"
+    local new="22222222-2222-2222-2222-222222222222"
+    printf '{}\n' > "$pd/$old.jsonl"
+    printf '%s|%s|Trim Me|500\n' "$old" "$HOME/trimproj" > "$__cm_sessions_file"
+
+    export CLAUDECM_CMV_NEWGUID="$new" CLAUDECM_CMV_WRITEDIR="$pd"
+    __cm_do_trim "$old" >/dev/null 2>&1
+    unset CLAUDECM_CMV_NEWGUID CLAUDECM_CMV_WRITEDIR
+
+    # cmv trim creates a NEW session and leaves the original unreferenced. Not
+    # filing it away is what caused the April 2026 orphan accumulation.
+    assert_true "$([[ ! -f "$pd/$old.jsonl" ]] && echo 0 || echo 1)" \
+        "the pre-trim transcript must not be left in the project key directory" || return 90
+    assert_true "$([[ -f "$__cm_backup_dir/trimproj/$old.jsonl" ]] && echo 0 || echo 1)" \
+        "spec 11.13 step 11: the pre-trim transcript must be moved to the backup"
+}
+
+t_trim_swaps_guid() {
+    _use_cmv_stub || return 90
+    local pd; pd=$(_mk_project trimproj2)
+    local old="33333333-3333-3333-3333-333333333333"
+    local new="44444444-4444-4444-4444-444444444444"
+    printf '{}\n' > "$pd/$old.jsonl"
+    printf '%s|%s|Keep My Name|500\n' "$old" "$HOME/trimproj2" > "$__cm_sessions_file"
+
+    export CLAUDECM_CMV_NEWGUID="$new" CLAUDECM_CMV_WRITEDIR="$pd"
+    __cm_do_trim "$old" >/dev/null 2>&1
+    unset CLAUDECM_CMV_NEWGUID CLAUDECM_CMV_WRITEDIR
+
+    local rows; rows=$(__cm_get_sessions | wc -l | tr -d ' ')
+    assert_eq "1" "$rows" "trim must not add or drop a row" || return 90
+    local first; first=$(__cm_get_sessions | head -1)
+    assert_true "$([[ "$first" == "$new|"* ]] && echo 0 || echo 1)" \
+        "the row must point at the trimmed transcript, or the session is unreachable" || return 90
+    assert_true "$([[ "$first" == *"Keep My Name"* ]] && echo 0 || echo 1)" \
+        "the session name must survive a trim"
+}
+
+t_fork_followed_and_predecessor_filed() {
+    _use_claude_stub || return 90
+    local pd; pd=$(_mk_project forkproj)
+    local orig="55555555-5555-5555-5555-555555555555"
+    local fork="66666666-6666-6666-6666-666666666666"
+    printf '{}\n' > "$pd/$orig.jsonl"
+    printf '%s|%s|Forked Session|900\n' "$orig" "$HOME/forkproj" > "$__cm_sessions_file"
+
+    export CLAUDECM_STUB_PROJDIR="$pd" CLAUDECM_STUB_GUID="$fork"
+    __cm_invoke_resume_with_fork_detection "$orig" "$HOME/forkproj" "machine - Forked Session" >/dev/null 2>&1
+    unset CLAUDECM_STUB_PROJDIR CLAUDECM_STUB_GUID
+
+    local first; first=$(__cm_get_sessions | head -1)
+    assert_true "$([[ "$first" == "$fork|"* ]] && echo 0 || echo 1)" \
+        "sessions.txt must follow the fork, or the live conversation is unreachable" || return 90
+    assert_eq "$fork" "${__cm_resume_effective_guid:-}" "the caller must be told which GUID is now live" || return 90
+    assert_true "$([[ ! -f "$pd/$orig.jsonl" ]] && echo 0 || echo 1)" \
+        "spec 11.6.1 step 4: the predecessor must be filed away or it becomes a spurious orphan"
+}
+
+t_plain_resume_changes_nothing() {
+    _use_claude_stub || return 90
+    local pd; pd=$(_mk_project plainproj)
+    local orig="77777777-7777-7777-7777-777777777777"
+    printf '{}\n' > "$pd/$orig.jsonl"
+    printf '%s|%s|Plain Resume|900\n' "$orig" "$HOME/plainproj" > "$__cm_sessions_file"
+
+    export CLAUDECM_STUB_PROJDIR="$pd" CLAUDECM_STUB_GUID="none"
+    __cm_invoke_resume_with_fork_detection "$orig" "$HOME/plainproj" "machine - Plain Resume" >/dev/null 2>&1
+    unset CLAUDECM_STUB_PROJDIR CLAUDECM_STUB_GUID
+
+    # The ordinary case, which is almost every resume. Getting this wrong files
+    # away the very session the operator is sitting in.
+    assert_true "$([[ -f "$pd/$orig.jsonl" ]] && echo 0 || echo 1)" \
+        "an ordinary resume must NOT file away the transcript still in use" || return 90
+    local first; first=$(__cm_get_sessions | head -1)
+    assert_true "$([[ "$first" == "$orig|"* ]] && echo 0 || echo 1)" \
+        "an ordinary resume must leave the registered GUID alone" || return 90
+    assert_true "$([[ "$first" == *"|900" ]] && echo 0 || echo 1)" \
+        "an ordinary resume must not reset the token count"
+}
+
+t_sync_index_drops_missing() {
+    # __cm_sync_session_index shells out to node. Without it the function
+    # returns silently and this project has no index sync at all, which is
+    # worth failing loudly about rather than passing quietly.
+    command -v node >/dev/null 2>&1 || {
+        echo "           node not found: __cm_sync_session_index cannot run on this box at all" >&2
+        return 90
+    }
+    local pd; pd=$(_mk_project idxproj)
+    local ondisk="a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5"
+    local gone="f6f6f6f6-0000-1111-2222-333333333333"
+    printf '{"type":"user"}\n' > "$pd/$ondisk.jsonl"
+    # THE ORACLE IS HAND-BUILT. Regenerating it by calling the same function
+    # would agree with itself no matter what it did.
+    cat > "$pd/sessions-index.json" <<JSON
+{"version":1,"originalPath":"$HOME/idxproj","entries":[
+ {"sessionId":"$gone","fullPath":"$pd/$gone.jsonl","fileMtime":0,"firstPrompt":"Gone","messageCount":5,
+  "created":"2026-01-01T00:00:00.000Z","modified":"2026-01-01T00:00:00.000Z","gitBranch":"","projectPath":"$HOME/idxproj","isSidechain":false},
+ {"sessionId":"$ondisk","fullPath":"$pd/$ondisk.jsonl","fileMtime":0,"firstPrompt":"Here","messageCount":5,
+  "created":"2026-01-01T00:00:00.000Z","modified":"2026-01-01T00:00:00.000Z","gitBranch":"","projectPath":"$HOME/idxproj","isSidechain":false}
+]}
+JSON
+    __cm_sync_session_index "$HOME/idxproj" >/dev/null 2>&1
+
+    local body; body=$(cat "$pd/sessions-index.json")
+    assert_true "$([[ "$body" == *"$ondisk"* ]] && echo 0 || echo 1)" \
+        "a transcript that exists must keep its entry" || return 90
+    assert_true "$([[ "$body" != *"$gone"* ]] && echo 0 || echo 1)" \
+        "spec 10 step 6: an entry whose transcript is gone must be dropped, or the resume picker offers a session that cannot open"
+}
+
+t_sync_index_names_registered() {
+    command -v node >/dev/null 2>&1 || {
+        echo "           node not found: __cm_sync_session_index cannot run on this box at all" >&2
+        return 90
+    }
+    local pd; pd=$(_mk_project namedproj)
+    local guid="b7b7b7b7-1111-2222-3333-444444444444"
+    printf '{"type":"user"}\n' > "$pd/$guid.jsonl"
+    printf '%s|%s|My Named Session|42\n' "$guid" "$HOME/namedproj" > "$__cm_sessions_file"
+
+    __cm_sync_session_index "$HOME/namedproj" >/dev/null 2>&1
+
+    local body; body=$(cat "$pd/sessions-index.json")
+    assert_true "$([[ "$body" == *"My Named Session"* ]] && echo 0 || echo 1)" \
+        "spec 10 step 7: a registered session carries its sessions.txt name into the index"
+}
+
+t_orphan_scan_silent_when_tidy() {
+    local pd; pd=$(_mk_project tidyproj)
+    local a="aaaaaaaa-1111-1111-1111-111111111111"
+    local b="bbbbbbbb-2222-2222-2222-222222222222"
+    printf '{}\n' > "$pd/$a.jsonl"; printf '{}\n' > "$pd/$b.jsonl"
+    printf '%s|%s|One|1\n%s|%s|Two|2\n' "$a" "$HOME/tidyproj" "$b" "$HOME/tidyproj" > "$__cm_sessions_file"
+
+    # The picker firing when nothing is wrong trains the operator to dismiss it,
+    # which is how a real orphan gets ignored.
+    local out; out=$(__cm_do_orphan_scan "$HOME/tidyproj" "$a" 2>&1 </dev/null)
+    assert_true "$([[ "$out" != *"Multiple conversation files"* ]] && echo 0 || echo 1)" \
+        "a project whose transcripts are all registered here must not raise the picker"
+}
+
+t_orphan_scan_quarantines_to_quarantine_root() {
+    local pd; pd=$(_mk_project messyproj)
+    local live="cccccccc-3333-3333-3333-333333333333"
+    local orph="dddddddd-4444-4444-4444-444444444444"
+    printf '{}\n' > "$pd/$live.jsonl"
+    printf '{}\n' > "$pd/$orph.jsonl"
+    touch -d "-2 hours" "$pd/$orph.jsonl" 2>/dev/null || touch -A -020000 "$pd/$orph.jsonl" 2>/dev/null
+    printf '%s|%s|Live One|1\n' "$live" "$HOME/messyproj" > "$__cm_sessions_file"
+
+    printf 'q 2\n' | __cm_do_orphan_scan "$HOME/messyproj" "$live" >/dev/null 2>&1
+
+    assert_true "$([[ -f "$__cm_quarantine_root/messyproj/$orph.jsonl" ]] && echo 0 || echo 1)" \
+        "spec 3.1: an orphan belongs in the quarantine root, not the trim backup" || return 90
+    assert_true "$([[ ! -f "$pd/$orph.jsonl" ]] && echo 0 || echo 1)" \
+        "the orphan must leave the project key directory" || return 90
+    assert_true "$([[ -f "$pd/$live.jsonl" ]] && echo 0 || echo 1)" \
+        "the live session must be untouched"
+}
+
+t_orphan_scan_protects_registered() {
+    local pd; pd=$(_mk_project protectproj)
+    local live="eeeeeeee-5555-5555-5555-555555555555"
+    local orph="ffffffff-6666-6666-6666-666666666666"
+    printf '{}\n' > "$pd/$live.jsonl"
+    printf '{}\n' > "$pd/$orph.jsonl"
+    # make the LIVE one newest so 'q 1' targets exactly the protected file
+    touch -d "-2 hours" "$pd/$orph.jsonl" 2>/dev/null || touch -A -020000 "$pd/$orph.jsonl" 2>/dev/null
+    printf '%s|%s|Do Not Move Me|1\n' "$live" "$HOME/protectproj" > "$__cm_sessions_file"
+
+    printf 'q 1\n' | __cm_do_orphan_scan "$HOME/protectproj" "$live" >/dev/null 2>&1
+
+    # The one keystroke that must never work.
+    assert_true "$([[ -f "$pd/$live.jsonl" ]] && echo 0 || echo 1)" \
+        "the registered session must still be in place: quarantining it moves the conversation about to be resumed"
+}
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 # Guards that the two backup destinations stay distinct. See the PowerShell
@@ -453,6 +650,44 @@ test_case "new-session detection survives a non-zero exit (spec 14.4)" \
     "bail out of __cm_invoke_claude_launch as soon as the child exits non-zero, which is the defect that made sessions vanish unless the user typed /exit" \
     's/__cm_launch_exit=\$?/__cm_launch_exit=$?; if [[ $__cm_launch_exit -ne 0 ]]; then return 0; fi/' \
     t_launch_detects_after_nonzero_exit
+
+test_case "do_trim files the pre-trim transcript to the backup (spec 11.13 step 11)" \
+    "delete the mv that files the pre-trim transcript, the omission that caused the April 2026 orphan accumulation" \
+    's|mv -f "\$pre_trim_file" "\$backup_sub/\$current_guid.jsonl"|: "$pre_trim_file"|' t_trim_files_pretrim
+
+test_case "do_trim swaps the GUID in sessions.txt and keeps the row" \
+    "keep the old GUID on the row, so sessions.txt points at a transcript that has just been filed away" \
+    's|updated+=("\$new_guid\|\$d\|\$desc\|\$t")|updated+=("$g\|$d\|$desc\|$t")|' t_trim_swaps_guid
+
+test_case "a forked resume follows the fork and files the predecessor (spec 11.6.1)" \
+    "delete the mv that files the fork predecessor, leaving it to trip the orphan picker next launch" \
+    's|mv -f "\$pred" "\$dest/\$original_guid.jsonl"|: "$pred"|' t_fork_followed_and_predecessor_filed
+
+test_case "a resume that did NOT fork changes nothing (spec 11.6.1)" \
+    "treat the newest transcript as a fork unconditionally, filing away the session the operator is sitting in" \
+    's|if \[\[ "\$newest_bn" != "\$original_guid" \]\] \&\& \[\[ -z "\$before_newest" \|\| "\$newest_bn" != "\$before_newest" \]\]; then|if true; then|' \
+    t_plain_resume_changes_nothing
+
+test_case "sync_session_index drops entries whose transcript is gone (spec 10 step 6)" \
+    "keep every pre-existing entry regardless of what is on disk" \
+    's|if (e && e.sessionId && onDisk\[e.sessionId\]) {|if (e && e.sessionId) {|' t_sync_index_drops_missing
+
+test_case "sync_session_index names a registered session from sessions.txt (spec 10 step 7)" \
+    "always write an empty firstPrompt, so the resume picker shows an unnamed session" \
+    "s@firstPrompt: r.desc || '',@firstPrompt: '',@" t_sync_index_names_registered
+
+test_case "do_orphan_scan stays silent when every transcript is accounted for" \
+    "break the directory comparison so a correctly-registered transcript always looks foreign" \
+    's|if \[\[ "\$match_dir" != "\$scan_dir" \]\]; then has_problem=1; break; fi|if true; then has_problem=1; break; fi|' \
+    t_orphan_scan_silent_when_tidy
+
+test_case "do_orphan_scan quarantines to the quarantine root, not the trim backup (spec 3.1)" \
+    "send the quarantined transcript to the trim/settings backup instead of the quarantine root" \
+    's|__cm_quarantine_root/\$leaf|__cm_backup_dir/$leaf|' t_orphan_scan_quarantines_to_quarantine_root
+
+test_case "do_orphan_scan refuses to quarantine the registered session" \
+    "remove the guard that refuses to quarantine the registered session" \
+    's|if \[\[ "\$g" == "\$registered_guid" \]\]; then|if false; then|' t_orphan_scan_protects_registered
 
 test_case "orphan quarantine and trim backup remain two distinct directories" \
     "point the orphan scan at __cm_backup_dir, unifying the two destinations" \

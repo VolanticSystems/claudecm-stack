@@ -299,7 +299,13 @@ const fs = require('fs'), path = require('path');
 const [,, projDir, originalPathArg, regFile] = process.argv;
 try {
   const files = fs.readdirSync(projDir).filter(n => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/.test(n));
-  if (files.length === 0) return;
+  // process.exit, NOT `return`. This script is fed to `node -` on stdin,
+  // which does NOT get the CommonJS module wrapper a file gets, so a
+  // top-level `return` is an Illegal return statement and the WHOLE
+  // script fails to compile. With 2>/dev/null on the call that failure
+  // was invisible and the function returned 0, so index sync never ran
+  // on Linux at all. Found 2026-08-27.
+  if (files.length === 0) process.exit(0);
   const indexPath = path.join(projDir, 'sessions-index.json');
   let existing = [], originalPath = originalPathArg;
   if (fs.existsSync(indexPath)) {

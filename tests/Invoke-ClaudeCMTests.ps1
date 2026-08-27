@@ -411,6 +411,76 @@ Test-Case -Name 'new-session detection uses set-diff, not newest-mtime (spec 11.
         }
     }
 
+Test-Case -Name 'Sync-SessionIndex drops entries whose transcript is gone (spec 10 step 6)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Sync-SessionIndex') `
+    -Sabotage 'seed validEntries with every pre-existing entry before the on-disk filter runs, so stale rows survive' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find    = '$indexedGuids = @{}'
+        Replace = '$validEntries = @($existingEntries); $indexedGuids = @{}' } } `
+    -Body {
+        # THE ORACLE IS HAND-BUILT, deliberately. Regenerating the expected
+        # index by calling the same function would bind nothing: it would agree
+        # with itself no matter what it did. The expectation below is derived
+        # from spec 10 and from what is on disk, by hand.
+        $projDir = Join-Path $sandbox.Root 'idxproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $onDisk = 'a1a1a1a1-b2b2-c3c3-d4d4-e5e5e5e5e5e5'
+        $gone   = 'f6f6f6f6-0000-1111-2222-333333333333'
+        Set-Content (Join-Path $keyDir "$onDisk.jsonl") '{"type":"user"}' -Encoding UTF8
+        # an index left over from before that transcript was deleted
+        # The fixture carries EVERY field spec 10 step 9 writes. An index
+        # missing one makes Sync-SessionIndex throw into its own swallowing
+        # try/catch and do nothing at all, silently: the first version of this
+        # test hit exactly that and looked like a product failure.
+        $stale = @{ version = 1; originalPath = $projDir; entries = @(
+            @{ sessionId = $gone;   fullPath = (Join-Path $keyDir "$gone.jsonl")
+               fileMtime = 0; firstPrompt = 'Gone'; messageCount = 5
+               created = '2026-01-01T00:00:00.000Z'; modified = '2026-01-01T00:00:00.000Z'
+               gitBranch = ''; projectPath = $projDir; isSidechain = $false },
+            @{ sessionId = $onDisk; fullPath = (Join-Path $keyDir "$onDisk.jsonl")
+               fileMtime = 0; firstPrompt = 'Here'; messageCount = 5
+               created = '2026-01-01T00:00:00.000Z'; modified = '2026-01-01T00:00:00.000Z'
+               gitBranch = ''; projectPath = $projDir; isSidechain = $false }
+        )}
+        $stale | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $keyDir 'sessions-index.json') -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $idx = Get-Content (Join-Path $keyDir 'sessions-index.json') -Raw | ConvertFrom-Json
+        $ids = @($idx.entries | ForEach-Object { $_.sessionId })
+        Assert-True ($ids -contains $onDisk) 'a transcript that exists must keep its entry'
+        Assert-True ($ids -notcontains $gone) `
+            'spec 10 step 6: an entry whose transcript is gone must be dropped, or the resume picker offers a session that cannot open'
+        Assert-Equal 1 $ids.Count 'the index must contain exactly the transcripts on disk'
+    }
+
+Test-Case -Name 'Sync-SessionIndex names a registered session from sessions.txt (spec 10 step 7)' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Sync-SessionIndex') `
+    -Sabotage 'always write an empty firstPrompt, so the resume picker shows an unnamed session' `
+    -Mutate @{ 'Sync-SessionIndex' = @{
+        Find = '$firstPrompt = $sessMatch.Desc'; Replace = '$firstPrompt = ""' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'namedproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+        $guid = 'b7b7b7b7-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$guid|$projDir|My Named Session|42" -Encoding UTF8
+
+        Sync-SessionIndex $projDir
+
+        $idx = Get-Content (Join-Path $keyDir 'sessions-index.json') -Raw | ConvertFrom-Json
+        $e = @($idx.entries | Where-Object { $_.sessionId -eq $guid })[0]
+        Assert-True ($null -ne $e) 'the transcript on disk must get an entry'
+        Assert-Equal 'My Named Session' $e.firstPrompt `
+            'spec 10 step 7: a registered session carries its sessions.txt name into the index'
+        Assert-Equal $projDir $e.projectPath 'a registered session carries its sessions.txt directory'
+    }
+
 Test-Case -Name 'Do-OrphanScan stays silent when every transcript is accounted for' `
     -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
             'Sync-SessionIndex','Do-OrphanScan') `
