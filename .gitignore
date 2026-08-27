@@ -4,8 +4,8 @@ private/
 *.tmp
 *.bak
 
-# TheRegents panel output. Verdicts land in the project the run was about, and
-# they are large, per-run, and reproducible from the bundle. Not source.
+# Model-panel review output. Verdicts land in the project the run was about,
+# and they are large, per-run, and reproducible from the bundle. Not source.
 .regents/
 
 # Scratch space. Anything in here that turns out to matter gets filed properly

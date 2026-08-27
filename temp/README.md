@@ -11,5 +11,5 @@ a task finishes, anything in here that turned out to matter gets filed properly
 in the project, and you say so. Do not leave the only copy of a real result in
 a folder named temp.
 
-Staged TheRegents bundles do NOT belong here: the staging tool refuses an
-`-Out` inside its `-Source`, so those live outside the repository.
+Staged review bundles do NOT belong here: the staging tool refuses an `-Out`
+inside its `-Source`, so those live outside the repository.

@@ -224,9 +224,8 @@ no.** Others may remain.
 **A test bound a comment, within an hour of the suite existing.** The bash
 structural test read the whole function body including comments, and failed
 against correct code because an explanatory comment inside `__cm_do_trim`
-mentioned `$__cm_quarantine_root` in prose. That is the same defect
-TheRegents itself fixed in its own suite (commit `11c70b5`, "Some tests were
-binding COMMENTS, and one of them guarded money"). Both harnesses now strip
+mentioned `$__cm_quarantine_root` in prose. That is a defect another
+project in this stack hit in its own suite and fixed for the same reason. Both harnesses now strip
 comments before matching. **A structural test that a comment can turn red is
 not testing behaviour**, and the failure mode is invisible unless the comment
 happens to disagree with the code.
