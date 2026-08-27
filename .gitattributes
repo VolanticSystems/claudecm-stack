@@ -13,6 +13,13 @@
 *.sh    text eol=lf
 *.bash  text eol=lf
 
+# extract-skeleton.mjs carries a #!/usr/bin/env node shebang and is shipped to
+# the Linux box, so it fails the same way a CRLF .sh does if it is ever run
+# directly rather than through `node <file>`. Its blob is LF today; this pins it
+# so a future commit made with autocrlf off cannot quietly flip it.
+*.mjs   text eol=lf
+*.js    text eol=lf
+
 # PowerShell is Windows-side and CRLF is correct for it.
 *.ps1   text eol=crlf
 *.psd1  text eol=crlf
