@@ -321,26 +321,30 @@ Useful switches: `-Only <substring>` / `ONLY=<substring>` to run one test,
 
 Current, as of 2026-08-27:
 
-    PowerShell   33 tests   33 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
-    bash         30 tests   30 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    PowerShell   60 tests   60 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    bash         37 tests   37 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
 
-Coverage is 21 of 32 PowerShell functions, 66%, measured by asking which
-functions any test names rather than by estimating. That is an upper bound:
-naming a function is not the same as asserting on it. The eleven with no test
-are the interactive surface (`Show-List`, `Do-EditList`, `Do-ViewArchived`,
-`Do-DeleteSession`, `Do-Resume`, `Get-SessionDisplayName`), the archive writer
-(`Save-ArchivedSessions`), `Ensure-CleanupPeriodDays`, and the two recovery
-paths plus their prompt builder (`Resolve-ResumeOrRecover`, `Do-Refresh`,
-`Build-RecoveryMetaPrompt`).
+Coverage is 32 of 32 PowerShell functions and 26 of 42 on bash, measured by
+asking which functions a test names rather than by estimating. Read the
+PowerShell number as an upper bound: naming a function is not the same as
+asserting on it, and a few are reached only as dependencies of another test.
 
-## 9. Two environment findings that are not product bugs
+bash is where the gap is now, and it is the one that matters, because bash
+trails PowerShell and nothing notices when it falls further behind. The
+sixteen without tests include the resume path, the refresh path and post-exit
+registration, which between them decide whether a session survives. Their
+PowerShell twins all have tests, so the sabotages are written and need porting
+rather than inventing.
+
+## 9. Environment findings, and one product bug
 
 Both cost real time, so they are written down rather than remembered.
 
 **Every `.sh` in this repo was stored with CRLF.** `core.autocrlf=true` and no
 `.gitattributes`. Git Bash tolerates it, so the suite ran green here all
 evening while the file that would land on Linux was broken: a CRLF shebang
-sends the kernel looking for an interpreter named `bash`. Now pinned by
+sends the kernel looking for an interpreter named `bash
+`. Now pinned by
 `.gitattributes` and the tree renormalised. The lesson is narrower than "check
 line endings": **the working copy is not what git stores.** Verify the blob,
 `git show ":path" | file -`, because the working copy is exactly what autocrlf
@@ -357,3 +361,48 @@ means every write stalls ten seconds and then proceeds *unlocked anyway*, which
 is the worst of both. The module never checks for it at startup. That is a
 plausible defect and is flagged in `LINUX-HANDOVER.md` rather than fixed here,
 because it is a product change and this sitting was about tests.
+
+
+## 10. What testing actually found
+
+Worth separating, because the ratio is the interesting part.
+
+**Wrong with the TESTS (five, all caught by the detectors, none by reading):**
+
+1. PowerShell `-replace` treats `$_` as the entire input string, so mutations
+   spliced whole functions into themselves. Two tests passed for the wrong
+   reason. Fixed by using literal `.Replace()`.
+2. The harness imposed `Set-StrictMode` and `set -u`, which the product sets
+   neither of. Testing a program under stricter semantics than anyone runs it
+   with is testing a different program.
+3. A structural test bound a COMMENT rather than code. Both harnesses now strip
+   comments before matching.
+4. bash `_use_claude_stub` used `local stub=...`, and bash scopes locals to the
+   call, so `$claude_exe` was empty and a test asserting "no transcript
+   produced" passed for the wrong reason.
+5. Two assertions written as `@(Get-Sessions).Count`. Spec 14.3: the function
+   comma-returns so the array survives unrolling, which means `@()` nests it
+   and `.Count` is 1 regardless of the file. Neither assertion could ever fail.
+
+Number 5 is the one to remember. It is not a wrong test, it is a test that
+LOOKS like coverage, and no per-test sabotage can find it because the fault
+lives in the assertion rather than in the product. It needed a check one level
+up, which now exists.
+
+**Wrong with the TOOL (four):**
+
+1. bash adopted a stranger's conversation: `__cm_invoke_claude_launch` fell
+   back to newest-in-directory when the set-diff was empty, which is exactly
+   when the launch produced nothing.
+2. `__cm_sync_session_index` had never worked on Linux. `node -` on stdin gets
+   no CommonJS wrapper, so a top-level `return` is an Illegal return statement,
+   and `2>/dev/null` hid the SyntaxError while the function returned 0.
+3. Every `.sh` in the repo was stored with CRLF, including the module itself.
+4. `__cm_ensure_cleanup_period_days` announces success without checking whether
+   it did anything. Found, not fixed: it is a product change and needs a
+   decision, so it is written up in `LINUX-HANDOVER.md` section 2c.
+
+Two of the four (2 and 4) are the same shape: a redirect hiding a fatal error
+on a call whose failure looks like success. Neither would have been found by
+reading the code, because both work perfectly when run any other way. That is
+the pattern worth grepping for elsewhere in the module.
