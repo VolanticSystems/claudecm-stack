@@ -51,7 +51,7 @@ instead of a working copy, and I did not, because everything I ran passed.
     git pull
     bash tests/run-tests.sh
 
-Expected: `37 test(s): 37 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
+Expected: `40 test(s): 40 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
 inconclusive`, and exit 0. Should take a few seconds.
 
 **If it takes minutes, you have no `flock`.** Git Bash ships none, and
@@ -141,53 +141,64 @@ took `head -1` of a **sorted** list, which is first alphabetically and has
 nothing to do with which session is ours. It now compares mtimes across the new
 set only, using the existing `__cm_file_mtime_epoch` helper.
 
-### 2c. A bug I found and did NOT fix, because it needs Bob's say-so
+### 2c. Announcing protection it had not applied. Fixed, and the cause was not what I first said.
 
-`__cm_ensure_cleanup_period_days` **announces success without checking whether
-it did anything.** The structure is:
+`__cm_ensure_cleanup_period_days` printed
 
-```bash
-current=$("$node" -e "...read cleanupPeriodDays..." 2>/dev/null)
-if [[ -z "$current" ]] || (( current < 1000 )); then
-    cp -f "$settings" "$__cm_backup_dir/settings.json.$ts" 2>/dev/null
-    "$node" -e "...write cleanupPeriodDays=100000..." 2>/dev/null
-    __cm_say_c "$__CM_C_CYAN" "Protected session transcripts from ... auto-delete."
-fi
-```
+    Protected session transcripts from Claude Code's 30-day auto-delete.
 
-Every node call is silenced and the message is printed unconditionally. If the
-write fails for any reason the user is told their transcripts are protected
-while `cleanupPeriodDays` is still 30, and Claude Code deletes them a month
-later. Note also that a FAILED read produces an empty `current`, which the guard
-treats as "needs fixing" and proceeds, so a broken read and a genuinely low
-value are indistinguishable.
+unconditionally, inside the needs-fixing branch, with every node call silenced
+by `2>/dev/null`. I watched it print that line and leave `settings.json`
+byte-for-byte unchanged. The user is told their transcripts are safe and Claude
+Code deletes them a month later: a failure with no symptom until the data is
+gone.
 
-I watched it do exactly this. Under Git Bash the function printed its success
-line and left `settings.json` byte-for-byte unchanged.
+A second defect sat underneath it. The read was
 
-**The trigger I saw is Windows-only** and you will not hit it: node on Windows
-cannot open the POSIX sandbox path that Git Bash hands it. On your box node
-reads `/home/...` perfectly well, so the function almost certainly works. The
-unconditional message is a real defect regardless of what triggers it, and it is
-the same shape as 2a: `2>/dev/null` on a call whose failure looks like success.
+    String(s.cleanupPeriodDays||'')
 
-Not fixed here. It is a product change rather than a test, so it is Bob's call.
-The fix is small: read the value back after writing and only announce if it
-actually changed.
+which collapses two very different states into an empty string: *the key is
+absent*, which does need fixing, and *I could not read the file at all*, which
+does not. Both were then treated as "needs fixing", so a failed read actively
+drove a rewrite of a file that had never been parsed.
 
-**One test is therefore weaker than it looks.**
-`ensure_cleanup_period_days backs up settings.json before rewriting it` asserts
-only the backup, which is pure shell and binds everywhere. It deliberately does
-NOT assert the resulting `cleanupPeriodDays`, because reading it back needs node
-and on Git Bash that assertion could not bind no matter what the product did. A
-test that cannot bind is worse than no test. **Please add the value assertion on
-your side**, where it means something:
+**Correction to what I first wrote here.** I said the Windows-only trigger was
+that node cannot open the POSIX path Git Bash hands it, and that your box would
+be unaffected. The second half is right; the first half named the wrong
+mechanism. The path was being **interpolated into the JavaScript source** rather
+than passed as an argument, and MSYS only rewrites a POSIX path into a Windows
+one when it is an ARGUMENT to a native program. Buried inside a string literal
+it is passed through untouched, so node went looking for `/tmp/...` on a Windows
+filesystem. Passing it as `process.argv[1]` fixes that, and the function now
+works correctly under Git Bash as well. That was not a change I made in order to
+fix the Windows behaviour; I made it because interpolating a path into source is
+fragile, and it turned out to be the actual cause.
 
-```bash
-val=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.env.HOME+'/.claude/settings.json','utf8')).cleanupPeriodDays))")
-# must be >= 1000, and must NEVER be 0: the code comments explain that 0
-# disables persistence rather than extending it
-```
+The rewritten function now:
+
+1. distinguishes a number, `NONE` (key absent) and `ERR` (unreadable), and
+   returns immediately on `ERR` without backing up or writing anything;
+2. passes the settings path as argv on all four node calls;
+3. **reads the value back off disk** and announces only if it is really >= 1000,
+   warning explicitly otherwise.
+
+The PowerShell twin had the same shape in a milder form: its write was followed
+by an unguarded `Write-Host`, so a non-terminating write failure would announce
+success even though a throwing one would not. Both modules now behave the same.
+
+Six tests cover it, three per module: retention is raised and announced; an
+unreadable file is left alone with no backup taken; and protection is never
+claimed for a write that did not land. That last one forces a real failure with
+`chmod 444` rather than relying on the platform, because otherwise the assertion
+is vacuously true wherever the write succeeds, the sabotage cannot be caught,
+and the detector correctly calls it hollow. It did, twice, before I fixed it.
+
+Worth knowing for anything you add: **two of my sabotages here were no-ops
+because the new code guards the same thing twice.** Removing the `ERR` guard
+changes nothing, since a later check rejects `ERR` as non-numeric anyway. The
+sabotage that works is the one that reinstates the OLD behaviour, treating an
+unreadable file as an absent key. A sabotage has to model a plausible wrong
+implementation, not just delete a line.
 
 ---
 
@@ -318,7 +329,8 @@ Anything that fails, obviously. Beyond that:
   when the behaviour was present under a different name. **Check what the code
   does, not what it is called.**
 - Coverage, measured rather than estimated: **32 of 32** PowerShell functions
-  are touched by at least one test, and **26 of 42** on bash, 61%. (34 `function` declarations minus
+  are touched by at least one test, and **26 of 42** on bash, 61%.
+  PowerShell 62 tests, bash 40. (34 `function` declarations minus
   `grep` and `lst`, which are Bob's shell helpers that happen to live in the
   same file.) Treat that as an upper bound: it counts a function as covered if
   any test names it, and naming is not the same as asserting.

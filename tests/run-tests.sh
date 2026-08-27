@@ -923,6 +923,84 @@ test_case "archiving moves a session to the archive rather than dropping it" \
     "remove the session from the live list without adding it to the archive, deleting it from the tool while orphaning the transcript" \
     's@archived+=("\$entry")@:@' t_edit_list_archive_moves_not_drops
 
+t_cleanup_leaves_unreadable_alone() {
+    mkdir -p "$HOME/.claude"
+    # Not JSON. The old version could not tell a failed read from an absent
+    # key, because both produced an empty string, so it went on to back up and
+    # rewrite a file it had never successfully parsed.
+    printf '{not valid json at all\n' > "$HOME/.claude/settings.json"
+
+    __cm_ensure_cleanup_period_days >/dev/null 2>&1
+
+    local body; body=$(cat "$HOME/.claude/settings.json")
+    assert_eq '{not valid json at all' "$body" \
+        "a file that could not be parsed must be left exactly as it was" || return 90
+    local n; n=$(ls -1 "$__cm_backup_dir"/settings.json.* 2>/dev/null | wc -l | tr -d ' ')
+    assert_eq "0" "$n" \
+        "and nothing should have been backed up, because nothing was going to be rewritten"
+}
+
+t_cleanup_raises_and_announces() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "           node is required here; skipping would leave this unguarded" >&2
+        return 90
+    fi
+    mkdir -p "$HOME/.claude"
+    printf '{"cleanupPeriodDays":30,"theme":"dark"}\n' > "$HOME/.claude/settings.json"
+
+    local out; out=$(__cm_ensure_cleanup_period_days 2>&1)
+
+    # Note the path is handed to node as argv, not interpolated into the -e
+    # source. Under Git Bash that is the difference between working and not:
+    # MSYS rewrites a POSIX path into a Windows one when it is an ARGUMENT to a
+    # native program, and does not when it is buried inside a string literal.
+    # The old form left node looking for /tmp/... on a Windows filesystem.
+    local val; val=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).cleanupPeriodDays))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_true "$([[ "$val" =~ ^[0-9]+$ && "$val" -ge 1000 ]] && echo 0 || echo 1)" \
+        "retention must be raised well past 30 days; found [$val]" || return 90
+    local theme; theme=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).theme))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_eq "dark" "$theme" "rewriting settings.json must preserve every other key" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Protected session transcripts' && echo 0 || echo 1)" \
+        "and having actually raised it, it should say so"
+}
+
+t_cleanup_does_not_claim_what_it_did_not_do() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "           node is required here; skipping would leave this unguarded" >&2
+        return 90
+    fi
+    mkdir -p "$HOME/.claude"
+    printf '{"cleanupPeriodDays":30}\n' > "$HOME/.claude/settings.json"
+
+    # Make the write genuinely fail. Without this the assertion is vacuously
+    # true on any box where the write succeeds, the sabotage cannot be caught,
+    # and the detector rightly calls the test hollow. Read-only is a real
+    # condition anyway: a settings.json synced by a tool, checked out of a
+    # repo, or owned by another account behaves exactly like this.
+    chmod 444 "$HOME/.claude/settings.json"
+    local out; out=$(__cm_ensure_cleanup_period_days 2>&1)
+    chmod 644 "$HOME/.claude/settings.json"
+
+    local val; val=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).cleanupPeriodDays))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_eq "30" "$val" "precondition: the write must genuinely have failed for this test to mean anything" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Protected session transcripts' && echo 1 || echo 0)" \
+        "it must not report success for a write that did not land; the user would believe their transcripts were safe and lose them a month later" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Could not raise cleanupPeriodDays' && echo 0 || echo 1)" \
+        "and a failure the user cannot see is not much better than a false success"
+}
+
+test_case "ensure_cleanup_period_days leaves an unreadable settings.json alone" \
+    "reinstate the old behaviour: treat a failed read as an absent key, so an unparseable file is backed up and rewritten anyway" \
+    's@\[\[ -z "$current" || "$current" == "ERR" \]\] && return 0@current="NONE"@' t_cleanup_leaves_unreadable_alone
+
+test_case "ensure_cleanup_period_days raises retention and says so" \
+    "write 0 instead of 100000, the trap the code comments warn about: 0 disables persistence rather than extending it" \
+    's@s.cleanupPeriodDays=100000@s.cleanupPeriodDays=0@' t_cleanup_raises_and_announces
+
+test_case "ensure_cleanup_period_days never claims protection it did not apply" \
+    "announce unconditionally instead of checking what actually landed on disk, the bug this test was written for" \
+    's@(( after >= 1000 )); then@true; then@' t_cleanup_does_not_claim_what_it_did_not_do
+
 echo ""
 TOTAL=$((PASS+FAIL+HOLLOW+STALE+ERROR+INCONC))
 echo "  $TOTAL test(s): $PASS pass, $FAIL fail, $ERROR error, $HOLLOW hollow, $STALE stale-sabotage, $INCONC inconclusive"

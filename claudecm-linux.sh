@@ -83,16 +83,55 @@ __cm_ensure_cleanup_period_days() {
     local settings="$HOME/.claude/settings.json"
     [[ -f "$settings" ]] || return 0
     local node; node=$(__cm_resolve_node) || return 0
+
+    # Three distinct answers, deliberately. The old version printed
+    # String(s.cleanupPeriodDays||'') and collapsed two very different states
+    # into an empty string: "the key is absent", which does need fixing, and
+    # "I could not read the file at all", which does not. It then treated both
+    # as "needs fixing" and went on to announce success either way.
+    #
+    # The path is passed as argv rather than interpolated into the JS source.
+    # A path containing a quote or a backslash used to produce a syntax error
+    # inside the script, which 2>/dev/null then swallowed.
     local current
-    current=$("$node" -e "try{const s=JSON.parse(require('fs').readFileSync('$settings','utf8'));process.stdout.write(String(s.cleanupPeriodDays||''))}catch(e){}" 2>/dev/null)
-    if [[ -z "$current" ]] || (( current < 1000 )); then
-        local ts; ts=$(date +%Y%m%d-%H%M%S)
-        mkdir -p "$__cm_backup_dir" 2>/dev/null
-        cp -f "$settings" "$__cm_backup_dir/settings.json.$ts" 2>/dev/null
-        "$node" -e "
-try{const fs=require('fs');const s=JSON.parse(fs.readFileSync('$settings','utf8'));s.cleanupPeriodDays=100000;fs.writeFileSync('$settings',JSON.stringify(s,null,2));}catch(e){}
-" 2>/dev/null
+    current=$("$node" -e "
+try{const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
+process.stdout.write(s.cleanupPeriodDays===undefined?'NONE':String(s.cleanupPeriodDays));}
+catch(e){process.stdout.write('ERR');}" "$settings" 2>/dev/null)
+
+    # Could not read it. Change nothing and claim nothing: an announcement here
+    # would be a statement about a file we could not even parse.
+    [[ -z "$current" || "$current" == "ERR" ]] && return 0
+
+    if [[ "$current" != "NONE" ]]; then
+        [[ "$current" =~ ^[0-9]+$ ]] || return 0
+        (( current >= 1000 )) && return 0
+    fi
+
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "$__cm_backup_dir" 2>/dev/null
+    cp -f "$settings" "$__cm_backup_dir/settings.json.$ts" 2>/dev/null
+
+    "$node" -e "
+try{const fs=require('fs');const s=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+s.cleanupPeriodDays=100000;fs.writeFileSync(process.argv[1],JSON.stringify(s,null,2));}catch(e){}
+" "$settings" 2>/dev/null
+
+    # Read it back off DISK before saying anything. This message is the only
+    # thing the user ever sees about their transcripts being safe, so it has to
+    # be evidence that the write landed rather than the intention to write.
+    # Getting this wrong is silent: they are told they are protected, and a
+    # month later Claude Code deletes the transcripts anyway.
+    local after
+    after=$("$node" -e "
+try{const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
+process.stdout.write(String(s.cleanupPeriodDays));}catch(e){process.stdout.write('ERR');}" "$settings" 2>/dev/null)
+
+    if [[ "$after" =~ ^[0-9]+$ ]] && (( after >= 1000 )); then
         __cm_say_c "$__CM_C_CYAN" "Protected session transcripts from Claude Code's 30-day auto-delete."
+    else
+        __cm_say_c "$__CM_C_YELLOW" "[warning] Could not raise cleanupPeriodDays in settings.json."
+        __cm_say "Transcripts remain subject to Claude Code's 30-day auto-delete."
     fi
 }
 

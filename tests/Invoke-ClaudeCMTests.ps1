@@ -1,4 +1,4 @@
-# Invoke-ClaudeCMTests.ps1 - first test suite for claudecm-powershell.ps1
+﻿# Invoke-ClaudeCMTests.ps1 - first test suite for claudecm-powershell.ps1
 #
 # WHY THIS FILE LOOKS UNUSUAL
 #
@@ -930,9 +930,20 @@ Test-Case -Name 'Get-SessionDisplayName prefixes the machine name' `
             'the display name is what distinguishes the same project on two machines'
     }
 
-Test-Case -Name 'Ensure-CleanupPeriodDays raises the retention window and backs up first' `
+# -----------------------------------------------------------------------------
+# Ensure-CleanupPeriodDays. Three outcomes, three tests, because the whole point
+# of the 2026-08-27 fix is that they must be TOLD APART.
+#
+# The old version printed "Protected session transcripts..." unconditionally
+# inside the needs-fixing branch. I watched the bash twin print that line and
+# leave settings.json byte-for-byte unchanged. The user is then told their
+# transcripts are safe and Claude Code deletes them a month later, which is a
+# failure with no symptom until the data is gone.
+# -----------------------------------------------------------------------------
+
+Test-Case -Name 'Ensure-CleanupPeriodDays raises retention and backs up first' `
     -Uses @('Ensure-CleanupPeriodDays') `
-    -Sabotage 'write 0 instead of 100000, the exact trap the code comments warn about: 0 does not mean forever, it disables persistence' `
+    -Sabotage 'write 0 instead of 100000, the trap the code comments warn about: 0 disables persistence rather than extending it' `
     -Mutate @{ 'Ensure-CleanupPeriodDays' = @{
         Find    = "`$settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 100000 -Force"
         Replace = "`$settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 0 -Force" } } `
@@ -943,7 +954,7 @@ Test-Case -Name 'Ensure-CleanupPeriodDays raises the retention window and backs 
         # transcripts a month old. Start from the real hostile value.
         Set-Content $settingsPath '{"cleanupPeriodDays":30,"theme":"dark"}' -Encoding UTF8
 
-        Ensure-CleanupPeriodDays
+        $out = (Ensure-CleanupPeriodDays 6>&1 | Out-String)
 
         $after = Get-Content $settingsPath -Raw | ConvertFrom-Json
         Assert-True ($after.cleanupPeriodDays -ge 1000) `
@@ -953,8 +964,64 @@ Test-Case -Name 'Ensure-CleanupPeriodDays raises the retention window and backs 
         Assert-Equal 'dark' $after.theme `
             'rewriting settings.json must preserve every other key, or ClaudeCM eats the user config'
         $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
-        Assert-True ($backups.Count -ge 1) `
-            'settings.json must be backed up before it is rewritten'
+        Assert-True ($backups.Count -ge 1) 'settings.json must be backed up before it is rewritten'
+        Assert-True ($out -match 'Protected session transcripts') `
+            'and having actually raised it, it should say so'
+    }
+
+Test-Case -Name 'Ensure-CleanupPeriodDays does NOT claim protection it failed to apply' `
+    -Uses @('Ensure-CleanupPeriodDays') `
+    -Sabotage 'announce unconditionally instead of checking what actually landed on disk, which is the bug this test was written for' `
+    -Mutate @{ 'Ensure-CleanupPeriodDays' = @{
+        Find = 'if ($after -and $after -ge 1000) {'; Replace = 'if ($true) {' } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        Set-Content $settingsPath '{"cleanupPeriodDays":30}' -Encoding UTF8
+        # Read-only is a real condition, not a contrivance: a settings.json
+        # synced by a tool, checked out of a repo, or owned by another account
+        # behaves exactly like this. The write fails and the function has to
+        # notice.
+        Set-ItemProperty $settingsPath -Name IsReadOnly -Value $true
+        try   { $out = (Ensure-CleanupPeriodDays 6>&1 | Out-String) }
+        finally { Set-ItemProperty $settingsPath -Name IsReadOnly -Value $false }
+
+        $after = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        Assert-Equal 30 $after.cleanupPeriodDays 'precondition: the write must genuinely have failed for this test to mean anything'
+        Assert-True ($out -notmatch 'Protected session transcripts') `
+            'it must not report success for a write that did not land; the user would believe their transcripts were safe and lose them a month later'
+        Assert-True ($out -match 'could not raise cleanupPeriodDays') `
+            'and a failure the user cannot see is not much better than a false success'
+    }
+
+Test-Case -Name 'Ensure-CleanupPeriodDays leaves an unreadable settings.json alone' `
+    -Uses @('Ensure-CleanupPeriodDays') `
+    -Sabotage 'reinstate the old behaviour: treat a failed read as an absent key, so a file that could not be parsed is backed up and rewritten anyway' `
+    -Mutate @{ 'Ensure-CleanupPeriodDays' = @{
+        Find = '} catch { return }'; Replace = '} catch { $settings = [pscustomobject]@{} }' } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        # Not JSON. Previously a failed read produced an empty $current, which
+        # is indistinguishable from "the key is absent", so the function
+        # proceeded to rewrite a file it had never successfully parsed.
+        Set-Content $settingsPath '{not valid json at all' -Encoding UTF8
+        # The sabotage above hands back an EMPTY object rather than simply
+        # dropping the return, because there is a second guard on $settings
+        # being null and either edit alone is a no-op the detector correctly
+        # called hollow. An empty object is also the more faithful model of the
+        # old code, where a failed read produced an empty $current that was
+        # then read as "the key is absent, fix it".
+
+        $out = (Ensure-CleanupPeriodDays 6>&1 | Out-String)
+
+        Assert-True ((Get-Content $settingsPath -Raw) -match 'not valid json at all') `
+            'a file that could not be parsed must be left exactly as it was'
+        $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
+        Assert-Equal 0 $backups.Count `
+            'and nothing should have been backed up, because nothing was going to be rewritten'
+        Assert-True ($out -notmatch 'Protected session transcripts') `
+            'above all it must not claim protection for a file it could not read'
     }
 
 Test-Case -Name 'Save-ArchivedSessions writes the [archived] marker' `
