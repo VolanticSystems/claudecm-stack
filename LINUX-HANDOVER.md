@@ -16,7 +16,7 @@ to find out, and I would rather be corrected than agreed with.
     git pull
     bash tests/run-tests.sh
 
-Expected: `17 test(s): 17 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
+Expected: `26 test(s): 26 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
 inconclusive`, and exit 0.
 
 The suite is self-contained. It builds a sandbox per test, repoints `HOME` at
@@ -31,7 +31,37 @@ anything else in this document. Please report it rather than fixing around it.
 
 ---
 
-## 2. The bug I fixed, which is the reason you are reading this
+## 2. TWO bugs I fixed, and the second one is total
+
+### 2a. Index sync has never worked here. Not once.
+
+`__cm_sync_session_index` pipes its logic to `node -` on stdin. **Node does not
+apply the CommonJS module wrapper to a script read from stdin**, the way it does
+to a file, so the top-level
+
+    if (files.length === 0) return;
+
+is an `Illegal return statement` and the entire script fails to compile. The
+call carries `2>/dev/null`, so the SyntaxError went nowhere and the function
+returned 0 like a success.
+
+Net effect: `sessions-index.json` on your box has never been written or repaired
+by ClaudeCM. Claude Code's own `/resume` picker has been reading whatever stale
+index was last left lying there.
+
+Fixed with `process.exit(0)`, legal at top level and equivalent here. **Please
+confirm this on your node**, because the behaviour is version-dependent in
+principle and I only have one node to test against:
+
+    node --version
+    # then, from the repo:
+    awk '/<<.NODEJS./{f=1;next} /^NODEJS$/{f=0} f' claudecm-linux.sh > /tmp/sync.js
+    node - /tmp x y < /tmp/sync.js     # must NOT print Illegal return statement
+
+Worth internalising: **reading this code would never have found it.** Run as a
+file it works perfectly. Only the stdin path fails, and the redirect hid it.
+
+### 2b. bash adopted a stranger's conversation when a launch produced nothing
 
 `__cm_invoke_claude_launch` already implemented spec 11.6.2 set-diff detection.
 That part was fine. What was not fine:
@@ -82,6 +112,12 @@ your time.
 2. **`shellcheck`.** Not installed on this machine, so the bash changes have
    had `bash -n` and the suite and nothing else. If you have shellcheck, run it
    and tell me what it says. I expect findings.
+
+2b. **Other output silently thrown away.** The index-sync bug survived because
+   `2>/dev/null` hid a fatal error on a call whose failure looked like success.
+   That pattern appears elsewhere in the module. Worth grepping `2>/dev/null`
+   and asking, for each one, what it would look like if the thing behind it had
+   never worked at all.
 
 3. **Real `comm`, `mapfile`, process substitution, `local -a`.** All bash 4+,
    all used by the module before I touched it, all fine under Git Bash. Fine
@@ -173,10 +209,12 @@ Anything that fails, obviously. Beyond that:
   this round: I reported `Invoke-FreshLaunchWithDetection` as missing from bash
   when the behaviour was present under a different name. **Check what the code
   does, not what it is called.**
-- `Do-Trim` and `Do-OrphanScan` have no behavioural tests on either platform.
-  `Do-Trim` needs a `cmv` stub; `Do-OrphanScan` needs stdin injection. If you
-  build either stub, say so and I will mirror it on the Windows side rather
-  than inventing a second one.
+- Coverage is now 15 of 31 PowerShell functions, 48%, and bash mirrors the
+  whole of Tier 3. Everything that moves or deletes a transcript is guarded on
+  both sides. What is left untested is display helpers, the archive and edit
+  menus, and the two recovery paths (`Resolve-ResumeOrRecover`, `Do-Refresh`).
+  `Do-Refresh` pipes a large prompt over stdin and has its own history, so it
+  is the next one worth doing.
 
 Thanks. Genuinely: the Windows side has had a test suite for about a day, and
 half of what it found was wrong with the tests rather than the tool.
