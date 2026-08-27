@@ -102,6 +102,13 @@ function New-ProductScope {
     # Tier 3: the launch helpers shell out to $claudeExe. Point it at the stub.
     [void]$sb.AppendLine("`$claudeExe    = '$script:ClaudeStub'")
     [void]$sb.AppendLine('$machineNameFile = "$cmDir\machine-name.txt"')
+    # Bootstrap writes this file when it is missing and then reads $machineName
+    # back out of it, so a lifted function can rely on both existing. Mirror
+    # that order rather than just assigning the string: the product calls
+    # .Trim() on the result, which throws on $null, and a prelude that skipped
+    # the file would hide that.
+    [void]$sb.AppendLine('if (-not (Test-Path $machineNameFile)) { Set-Content $machineNameFile "testbox" -Encoding UTF8 }')
+    [void]$sb.AppendLine('$machineName = (Get-Content $machineNameFile -ErrorAction SilentlyContinue).Trim()')
     [void]$sb.AppendLine('$quarantineRoot  = Join-Path $sandbox.Root "quarantine"')
     # Deliberately a path that does not exist. Do-PostExit guards every cmv
     # call with Test-Path $cmvExe, so a missing binary means the snapshot and
@@ -908,6 +915,109 @@ Integration-Case -Name 'claudecm -s never offers the new-project fallback' `
     Assert-NotContains $out 'Create a NEW project' 'search mode must never offer to create a project'
 '@
 
+Test-Case -Name 'Get-SessionDisplayName prefixes the machine name' `
+    -Uses @('Get-SessionDisplayName') `
+    -Sabotage 'return the bare description, dropping the machine name that tells two boxes apart' `
+    -Mutate @{ 'Get-SessionDisplayName' = @{
+        Find = 'return "$machineName - $desc"'; Replace = 'return "$desc"' } } `
+    -Body {
+        # $machineName deliberately NOT set here. It comes from the prelude,
+        # which mirrors bootstrap by writing machine-name.txt and reading it
+        # back. Setting it locally would have made this test pass while the
+        # harness supplied nothing, which is exactly what it did on the first
+        # run until the seam-fidelity check refused it.
+        Assert-Equal 'testbox - My Project' (Get-SessionDisplayName 'My Project') `
+            'the display name is what distinguishes the same project on two machines'
+    }
+
+Test-Case -Name 'Ensure-CleanupPeriodDays raises the retention window and backs up first' `
+    -Uses @('Ensure-CleanupPeriodDays') `
+    -Sabotage 'write 0 instead of 100000, the exact trap the code comments warn about: 0 does not mean forever, it disables persistence' `
+    -Mutate @{ 'Ensure-CleanupPeriodDays' = @{
+        Find    = "`$settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 100000 -Force"
+        Replace = "`$settings | Add-Member -NotePropertyName 'cleanupPeriodDays' -NotePropertyValue 0 -Force" } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        # 30 is Claude Code's own default, and it is what silently deletes
+        # transcripts a month old. Start from the real hostile value.
+        Set-Content $settingsPath '{"cleanupPeriodDays":30,"theme":"dark"}' -Encoding UTF8
+
+        Ensure-CleanupPeriodDays
+
+        $after = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ($after.cleanupPeriodDays -ge 1000) `
+            "retention must be raised well past 30 days or Claude Code deletes transcripts ClaudeCM still lists; found $($after.cleanupPeriodDays)"
+        Assert-True ($after.cleanupPeriodDays -ne 0) `
+            '0 disables persistence rather than enabling it; it is the one value that must never be written here'
+        Assert-Equal 'dark' $after.theme `
+            'rewriting settings.json must preserve every other key, or ClaudeCM eats the user config'
+        $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
+        Assert-True ($backups.Count -ge 1) `
+            'settings.json must be backed up before it is rewritten'
+    }
+
+Test-Case -Name 'Save-ArchivedSessions writes the [archived] marker' `
+    -Uses @('Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock',
+            'Release-SessionsLock','Write-SessionsAtomic','Save-ArchivedSessions') `
+    -Sabotage 'omit the [archived] marker line, so archived rows are written straight into the live list' `
+    -Mutate @{ 'Save-ArchivedSessions' = @{
+        Find = "`$lines += '[archived]'"; Replace = "`$null = 'x'" } } `
+    -Body {
+        $live = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        $arch = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        Set-Content $sessionsFile "$live|$($sandbox.Root)|Still Working|10" -Encoding UTF8
+
+        Save-ArchivedSessions @([pscustomobject]@{
+            Guid = $arch; Dir = $sandbox.Root; Desc = 'Done With This'; Tokens = 20 })
+
+        # The marker is the ONLY thing separating the two lists. Without it the
+        # archived rows parse as ordinary sessions and reappear in the menu,
+        # which is the whole point of archiving them undone.
+        Assert-Equal 1 @(Get-Sessions).Count `
+            'an archived session must not come back as a live one'
+        Assert-Equal 1 @(Get-ArchivedSessions).Count `
+            'the archived session must be readable back out of the archive'
+        Assert-True ((Get-Content $sessionsFile -Raw) -match '\[archived\]') `
+            'the marker line must be present in the file itself'
+    }
+
+Test-Case -Name 'Do-DeleteSession removes the transcript AND its sidecar directory' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
+            'Sync-SessionIndex','Do-DeleteSession') `
+    -Sabotage 'skip the recursive removal of the per-GUID sidecar directory, leaving its contents behind after a delete the user was told was complete' `
+    -Mutate @{ 'Do-DeleteSession' = @{
+        Find = 'if (Test-Path $guidDir) { Remove-Item $guidDir -Recurse -Force }'; Replace = '$null = $guidDir' } } `
+    -Body {
+        $projDir = Join-Path $sandbox.Root 'delproj'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $guid = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        Set-Content (Join-Path $keyDir "$guid.jsonl") '{"type":"user"}' -Encoding UTF8
+        # Claude Code keeps per-session sidecar state next to the transcript.
+        # A delete that takes the transcript and leaves this behind is the kind
+        # of half-delete that looks fine until the directory is full of them.
+        $guidDir = Join-Path $keyDir $guid
+        New-Item -ItemType Directory -Path $guidDir -Force | Out-Null
+        Set-Content (Join-Path $guidDir 'shell-snapshot.txt') 'residue' -Encoding UTF8
+
+        # A second, unrelated session must survive untouched.
+        $keep = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+        Set-Content (Join-Path $keyDir "$keep.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$keep|$projDir|Keep Me|5" -Encoding UTF8
+
+        Do-DeleteSession $guid $projDir
+
+        Assert-True (-not (Test-Path (Join-Path $keyDir "$guid.jsonl"))) `
+            'the transcript must be gone: this is the destructive delete, not archive'
+        Assert-True (-not (Test-Path $guidDir)) `
+            'the per-GUID sidecar directory must go with it, or the delete is only half done'
+        Assert-True (Test-Path (Join-Path $keyDir "$keep.jsonl")) `
+            'deleting one session must not touch any other session in the same project'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #
@@ -999,7 +1109,7 @@ function Get-FreeVariables {
 # What the prelude actually defines, plus PowerShell's own automatics.
 $script:PreludeSupplies = @(
     'sandbox','cmDir','sessionsFile','backupDir','lockFile','tmpFile',
-    'claudeExe','machineNameFile','quarantineRoot','cmvExe'
+    'claudeExe','machineNameFile','quarantineRoot','cmvExe','machineName'
 )
 $script:PSAutomatics = @(
     '_','args','PSItem','true','false','null','LASTEXITCODE','?','PSScriptRoot',
