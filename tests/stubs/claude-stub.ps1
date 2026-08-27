@@ -34,12 +34,26 @@
 #                           skipped it would make the cleanup untestable.
 #   CLAUDECM_STUB_PEMPTY    report a JSON object with no .result, which is what
 #                           a failed generation looks like.
+#   CLAUDECM_STUB_STDIN_RECORD
+#                           file to write the received stdin CHARACTER COUNT
+#                           into. This is how a test tells a piped prompt from
+#                           one passed as an argument, which matters because
+#                           Windows caps a command line near 32K.
 
 # Headless mode first: it returns, so nothing below it can run.
 if ($env:CLAUDECM_STUB_PJSON -or $env:CLAUDECM_STUB_PEMPTY) {
     # Drain stdin. The caller pipes the meta-prompt in, and leaving it unread
     # can surface as a broken pipe on the writing end.
-    $null = @($input)
+    #
+    # The size is recorded rather than discarded because Do-Refresh pipes its
+    # prompt instead of passing it as an argument, and that is not a style
+    # choice: Windows caps a command line near 32K, and a refresh prompt
+    # carrying a skeleton goes well past it. A test can only tell the two apart
+    # by asking how many characters actually arrived.
+    $inText = (@($input) -join "`n")
+    if ($env:CLAUDECM_STUB_STDIN_RECORD) {
+        Set-Content -LiteralPath $env:CLAUDECM_STUB_STDIN_RECORD -Value $inText.Length -Encoding UTF8
+    }
 
     $sid = $env:CLAUDECM_STUB_PSID
     if ($sid -and $env:CLAUDECM_STUB_PROJDIR) {

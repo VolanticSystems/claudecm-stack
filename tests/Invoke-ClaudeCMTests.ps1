@@ -1312,6 +1312,184 @@ Test-Case -Name 'Resolve-ResumeOrRecover deletes the throwaway transcript its ow
             'and the recovery prompt itself must still have been written'
     }
 
+# -----------------------------------------------------------------------------
+# Do-Refresh. Flagged as the risky one and it earns that.
+#
+# It builds a prompt that embeds an extracted skeleton and pipes it to a
+# headless claude. The piping is not incidental. Passing the same text as an
+# argument works perfectly on small inputs and fails once the command line
+# passes roughly 32K, which is a size no toy fixture reaches. That combination,
+# correct on every small case and broken on every real one, cost a full day in
+# April 2026.
+#
+# So the fixture here is deliberately large: tests/stubs/extract-skeleton.mjs
+# emits an 80KB skeleton by default, and the stub reports how many characters
+# actually arrived on stdin.
+# -----------------------------------------------------------------------------
+
+function Install-FakeExtractor {
+    # Do-Refresh searches for extract-skeleton.mjs next to the script, then
+    # $env:CLAUDECM_HOME, then ~/.claudecm. Only the last one is inside the
+    # sandbox, so CLAUDECM_HOME is cleared: if the real machine has it set, the
+    # product would find the REAL extractor and the test would silently start
+    # measuring something else.
+    $env:CLAUDECM_HOME = $null
+    Copy-Item (Join-Path (Split-Path $script:ClaudeStub -Parent) 'extract-skeleton.mjs') `
+              (Join-Path $sandbox.CmDir 'extract-skeleton.mjs') -Force
+}
+
+Test-Case -Name 'Do-Refresh pipes the whole prompt on stdin, at a size no command line would hold' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Do-Refresh') `
+    -Sabotage 'pass the prompt as a command-line argument instead of piping it, the April 2026 bug: correct on every small input and truncated on every real one' `
+    -Mutate @{ 'Do-Refresh' = @{
+        Find    = '$refreshJson = $promptText | & $claudeExe --dangerously-skip-permissions -p --output-format json 2>&1 | Out-String'
+        Replace = '$refreshJson = & $claudeExe --dangerously-skip-permissions -p $promptText --output-format json 2>&1 | Out-String' } } `
+    -Body {
+        # A missing node must FAIL rather than skip. Skipping would quietly
+        # remove the only guard on the 32K path, which is the exact failure
+        # shape this test exists to prevent.
+        Assert-True ($null -ne (Get-Command node -ErrorAction SilentlyContinue)) `
+            'node is required to build a realistic skeleton; without it this test cannot guard the stdin path'
+        function Read-Host { param([string]$Prompt) '' }
+        Install-FakeExtractor
+
+        $projDir = Join-Path $sandbox.Root 'refreshbig'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $oldGuid = 'bbbb0000-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$oldGuid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile "$oldGuid|$projDir|Big Refresh|900" -Encoding UTF8
+
+        $record = Join-Path $sandbox.Root 'stdin-size.txt'
+        $env:CLAUDECM_STUB_PJSON        = 'ok'
+        $env:CLAUDECM_STUB_PSID         = 'cccc0000-1111-2222-3333-444444444444'
+        $env:CLAUDECM_STUB_PROJDIR      = $keyDir
+        $env:CLAUDECM_STUB_STDIN_RECORD = $record
+        try { Do-Refresh $oldGuid }
+        finally {
+            Remove-Item Env:CLAUDECM_STUB_PJSON, Env:CLAUDECM_STUB_PSID,
+                        Env:CLAUDECM_STUB_PROJDIR, Env:CLAUDECM_STUB_STDIN_RECORD -ErrorAction SilentlyContinue
+        }
+
+        Assert-True (Test-Path $record) `
+            'the headless call must actually have been made; no record means claude was never reached'
+        $got = [int](Get-Content $record -Raw).Trim()
+        # 32768 is the number that matters. Asserting comfortably above it means
+        # the test cannot pass on a prompt that a command line could have carried.
+        Assert-True ($got -gt 40000) `
+            "the entire prompt must reach claude on stdin; only $got characters arrived, which is the size a truncating argument path produces"
+    }
+
+Test-Case -Name 'Do-Refresh puts the new session first and the old one last, renamed' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Do-Refresh') `
+    -Sabotage 'drop the old session from the rewritten list, silently discarding the conversation the refresh was meant to preserve' `
+    -Mutate @{ 'Do-Refresh' = @{
+        Find = 'if ($oldEntry) { $newSessions += $oldEntry }'; Replace = '$null = $oldEntry' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '' }
+        $env:CLAUDECM_HOME = $null   # no extractor: this test is about the list
+
+        $projDir = Join-Path $sandbox.Root 'refreshlist'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $oldGuid   = 'dddd0000-1111-2222-3333-444444444444'
+        $freshGuid = 'eeee0000-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$oldGuid.jsonl") '{"type":"user"}' -Encoding UTF8
+        Set-Content $sessionsFile @(
+            "$oldGuid|$projDir|Main Work|900",
+            "9999aaaa-1111-2222-3333-444444444444|$projDir|Unrelated|5") -Encoding UTF8
+
+        $env:CLAUDECM_STUB_PJSON   = 'ok'
+        $env:CLAUDECM_STUB_PSID    = $freshGuid
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        try { Do-Refresh $oldGuid }
+        finally { Remove-Item Env:CLAUDECM_STUB_PJSON, Env:CLAUDECM_STUB_PSID, Env:CLAUDECM_STUB_PROJDIR -ErrorAction SilentlyContinue }
+
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-Equal 3 $rows.Count "refresh must add one row and lose none; got $($rows.Count)"
+        Assert-True ($rows[0].StartsWith($freshGuid)) 'the fresh session belongs at the top'
+        Assert-True ($rows[-1] -match '\(old\)') `
+            'the refreshed-from session must be kept, renamed (old), at the bottom: it still holds the conversation'
+        Assert-True ($rows[-1].StartsWith($oldGuid)) 'and it must still point at the original transcript'
+    }
+
+Test-Case -Name 'Do-Refresh numbers a second (old) rather than colliding with the first' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Do-Refresh') `
+    -Sabotage 'always use the bare (old) suffix, producing two sessions with identical names in the same project' `
+    -Mutate @{ 'Do-Refresh' = @{
+        Find = 'if ($n -eq 1) { $oldDesc = "$baseDesc (old)" } else { $oldDesc = "$baseDesc (old $n)" }'
+        Replace = '$oldDesc = "$baseDesc (old)"' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '' }
+        $env:CLAUDECM_HOME = $null
+
+        $projDir = Join-Path $sandbox.Root 'refreshtwice'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $cur = '1111bbbb-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$cur.jsonl") '{"type":"user"}' -Encoding UTF8
+        # "Main Work (old)" already exists, from a previous refresh of the same
+        # project. A second refresh must not produce a duplicate name: the list
+        # is chosen from by number, but a human still has to tell them apart.
+        Set-Content $sessionsFile @(
+            "$cur|$projDir|Main Work|900",
+            "2222bbbb-1111-2222-3333-444444444444|$projDir|Main Work (old)|10") -Encoding UTF8
+
+        $env:CLAUDECM_STUB_PJSON   = 'ok'
+        $env:CLAUDECM_STUB_PSID    = '3333bbbb-1111-2222-3333-444444444444'
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        try { Do-Refresh $cur }
+        finally { Remove-Item Env:CLAUDECM_STUB_PJSON, Env:CLAUDECM_STUB_PSID, Env:CLAUDECM_STUB_PROJDIR -ErrorAction SilentlyContinue }
+
+        $text = Get-Content $sessionsFile -Raw
+        Assert-True ($text -match '\(old 2\)') `
+            'the second refresh must number its predecessor (old 2); two rows named the same thing are indistinguishable in the list'
+        $olds = @(Get-Content $sessionsFile | Where-Object { $_ -match 'Main Work \(old\)\|' -or $_ -match 'Main Work \(old\)$' })
+        Assert-Equal 1 $olds.Count 'there must still be exactly one bare (old)'
+    }
+
+Test-Case -Name 'a refresh that produced no session leaves sessions.txt untouched' `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Do-Refresh') `
+    -Sabotage 'carry on without a new GUID, rewriting the list around a session that was never created' `
+    -Mutate @{ 'Do-Refresh' = @{
+        Find    = 'if (-not $freshGuid) {'
+        Replace = 'if ($false) {' } } `
+    -Body {
+        function Read-Host { param([string]$Prompt) '' }
+        $env:CLAUDECM_HOME = $null
+
+        $projDir = Join-Path $sandbox.Root 'refreshfail'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $keyDir = Join-Path $sandbox.ClaudeProj (Get-ProjectKey $projDir)
+        New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+
+        $cur = '4444cccc-1111-2222-3333-444444444444'
+        Set-Content (Join-Path $keyDir "$cur.jsonl") '{"type":"user"}' -Encoding UTF8
+        $before = "$cur|$projDir|Precious Work|900"
+        Set-Content $sessionsFile $before -Encoding UTF8
+
+        # PEMPTY: claude answered, but with no session_id. That is what a failed
+        # headless run looks like, and the only safe response is to change
+        # nothing. Renaming the existing session (old) at that point would leave
+        # the user with a list whose every entry is marked superseded by a
+        # session that does not exist.
+        $env:CLAUDECM_STUB_PEMPTY  = '1'
+        $env:CLAUDECM_STUB_PROJDIR = $keyDir
+        try { Do-Refresh $cur }
+        finally { Remove-Item Env:CLAUDECM_STUB_PEMPTY, Env:CLAUDECM_STUB_PROJDIR -ErrorAction SilentlyContinue }
+
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-Equal 1 $rows.Count 'a failed refresh must not add a row'
+        Assert-Equal $before $rows[0] `
+            'a failed refresh must leave the original session exactly as it was, name included'
+    }
+
 # =============================================================================
 # TIER 0 - structural. Asserts on the module SOURCE, not its behaviour.
 #
