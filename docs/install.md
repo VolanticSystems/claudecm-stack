@@ -26,16 +26,15 @@ Bun is a JavaScript runtime (like Node.js) that Claude-Mem uses for one reason: 
 
 ## Step 1: Claude Context Manager (Session Manager)
 
+Files live in `~/.claudecm/` and the module is dot-sourced from your shell profile. This keeps one canonical copy and makes updates a single command (`deploy.ps1` on Windows, `deploy.sh` on Linux). The deploy scripts are idempotent, back up any file they overwrite to `~/.claudecm/backup/*.pre-deploy`, and skip byte-identical files.
+
 ### Windows (PowerShell)
 
-The script lives in `~/.claudecm/` and is dot-sourced from your PowerShell profile. This keeps one canonical copy and makes updates trivial (replace the file, no profile edits).
-
-1. Create the ClaudeCM directory and copy the script:
+1. From the repo root, install the runtime files:
    ```powershell
-   New-Item -ItemType Directory -Force "$env:USERPROFILE\.claudecm" | Out-Null
-   Copy-Item .\claudecm-powershell.ps1 "$env:USERPROFILE\.claudecm\claudecm-powershell.ps1"
-   Copy-Item .\extract-skeleton.mjs    "$env:USERPROFILE\.claudecm\extract-skeleton.mjs"
+   .\deploy.ps1
    ```
+   This creates `~/.claudecm/`, copies `claudecm-powershell.ps1`, `extract-skeleton.mjs`, `bgcolor.ps1`, and `register-late-guid.ps1` into it, and writes a small `bgcolor.cmd` shim to `~/bin/` so plain `bgcolor` works from any shell.
 
 2. Open your PowerShell profile:
    ```powershell
@@ -52,13 +51,13 @@ The script lives in `~/.claudecm/` and is dot-sourced from your PowerShell profi
 
 5. Type `claudecm` to launch Claude Code with session management.
 
-**To update later:** replace `~/.claudecm/claudecm-powershell.ps1` with a newer version from the repo. The profile line stays untouched.
+**To update later:** `git pull` in the repo, then run `.\deploy.ps1` again. The profile line stays untouched. If you have the personal-preference tweak below turned on, deploy will warn if it got overwritten so you can re-enable it.
 
-**Optional: silence Claude Code's suggested-prompt hints.** Claude Code shows follow-up prompt suggestions in the command line. To turn them off, uncomment this line near the top of `claudecm-powershell.ps1` (it ships commented out):
+**Optional: silence Claude Code's suggested-prompt hints.** Claude Code shows follow-up prompt suggestions in the command line. To turn them off, uncomment this line near the top of `~/.claudecm/claudecm-powershell.ps1` (it ships commented out):
 ```powershell
 $env:CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "0"
 ```
-This is a personal preference, off by default. Re-apply it after updating the script, since updates overwrite the file.
+This is a personal preference, off by default. Re-apply it after `deploy.ps1` overwrites the file; the deploy script will detect and warn you when this happens.
 
 ### Linux
 
@@ -68,17 +67,19 @@ This is a personal preference, off by default. Re-apply it after updating the sc
    ```
    Claude Code cannot run as root with `--dangerously-skip-permissions`. The script auto-detects if you're root and re-execs as the `claude` user via `sudo -u claude`. If you always run as a non-root user, you can skip this step and the re-exec will never trigger.
 
-2. Copy the script:
+2. From the repo root, install:
    ```bash
-   sudo cp claudecm-linux.sh /usr/local/bin/claudecm
-   sudo chmod +x /usr/local/bin/claudecm
+   ./deploy.sh
    ```
+   This copies `extract-skeleton.mjs` and `register-late-guid.sh` to `~/.claudecm/`, and installs `claudecm-linux.sh` to `/usr/local/bin/claudecm` (prompts for sudo).
 
 3. If using the `claude` user, make sure Claude Code is installed for that user and the `claude` user has access to your project directories.
 
 4. Type `claudecm` to launch Claude Code with session management.
 
-**Optional (same as Windows):** to silence Claude Code's suggested-prompt hints, uncomment `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0` near the top of the `claudecm()` function. Off by default; re-apply after updating the script.
+**To update later:** `git pull` in the repo, then run `./deploy.sh` again.
+
+**Optional (same as Windows):** to silence Claude Code's suggested-prompt hints, uncomment `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=0` near the top of the `claudecm()` function. Off by default; re-apply after `deploy.sh` overwrites the file.
 
 ## Step 2: Context-Manager (Layer 1, Compaction Insurance)
 
