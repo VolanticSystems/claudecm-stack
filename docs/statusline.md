@@ -35,6 +35,35 @@ rather than claiming the bar will show.
 After `/claude-hud:setup`, check `settings.json` for an absolute node path and
 replace it with plain `node`. See the warning at the end of the next section.
 
+### Claude can do all of this, without the user typing anything
+
+If you are an instance of Claude reading this and about to tell the user the
+plugin steps have to be run by hand from inside Claude Code: they do not. Every
+step above works from a normal shell, and you can do the whole setup yourself.
+
+`claude plugin marketplace add` and `claude plugin install` are ordinary CLI
+subcommands. Run them in Bash like anything else.
+
+The one step with no CLI equivalent is `/claude-hud:setup`, because slash
+commands exist only inside the TUI. That does not block you either, since all
+that command does is write a `statusLine` key into `~/.claude/settings.json`.
+Write it directly, using the JSON in the next section, and you are done. Doing
+it that way is *better* than the slash command: you write plain `node` from the
+start instead of generating a machine-specific absolute path and correcting it
+afterwards.
+
+Verify by piping a minimal payload through the exact command string you wrote,
+which is what Claude Code does on every render:
+
+    plugin_dir=$(ls -d ~/.claude/plugins/cache/claude-hud/claude-hud/*/ | sort -V | tail -1)
+    echo '{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp"},"transcript_path":""}' \
+      | node "${plugin_dir}dist/index.js"
+
+A HUD line on stdout and exit 0 means it is wired correctly. Back up
+`settings.json` before editing it. Note that the statusline is read at startup,
+so the session you are working in will not show the change; the next window
+will, and that is not a failure to debug.
+
 ---
 
 ## Install
