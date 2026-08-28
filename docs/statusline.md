@@ -15,6 +15,28 @@ independent of ClaudeCM and either can be used without the other.
 
 ---
 
+## Setting up a new machine, in order
+
+The whole sequence, because the pieces have to happen in this order and
+`deploy` only does the last one:
+
+    claude plugin marketplace add jarrodwatts/claude-hud
+    claude plugin install claude-hud@claude-hud
+    # restart Claude Code, then inside it:
+    /claude-hud:setup
+    # then, from the repo:
+    .\deploy.ps1          # Windows   (or ./deploy.sh on Linux)
+
+`deploy` runs `configure-hud`, which sets the weekly-bar threshold and the
+first-turn snapshot described below. Running it before the plugin exists is
+harmless: it writes the config, then tells you exactly what is still missing
+rather than claiming the bar will show.
+
+After `/claude-hud:setup`, check `settings.json` for an absolute node path and
+replace it with plain `node`. See the warning at the end of the next section.
+
+---
+
 ## Install
 
 Three commands, then restart Claude Code.
