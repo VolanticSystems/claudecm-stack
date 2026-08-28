@@ -104,6 +104,12 @@ Without the stack: You resume a session. Claude has a vague summary of what happ
 
 With the stack: You resume a session. The context-manager checkpoint restores your working state. CMV has trimmed the bloat so you have room to work. Claude-Mem injects compressed memories from last time. Claude picks up roughly where you left off. Not perfectly --- nothing is perfect --- but the difference between "where were we?" and "I was debugging the auth middleware and the token refresh had a race condition on line 247" is the difference between a productive morning and a frustrating one.
 
+### Seeing it happen: the statusline
+
+None of the above is visible while you work. The gauges along the bottom of the terminal are **claude-hud**, a plugin by Jarrod Watts, and they show the context window filling in real time along with usage against the 5-hour and weekly limits. It is not part of ClaudeCM and neither needs the other, but watching the context bar climb is what makes the rest of this concrete rather than theoretical.
+
+Install and update instructions: [docs/statusline.md](docs/statusline.md).
+
 ## Why Not Just Use Volt?
 
 The short answer is because it requires API access which is far more expensive, but in the interest of a more complete technical discussion, Volt is a research project from Voltropy that takes this idea further. It replaces Claude Code entirely with a dual-state memory architecture: an immutable store that never deletes anything, and an active context window that gets curated per-turn based on relevance.
