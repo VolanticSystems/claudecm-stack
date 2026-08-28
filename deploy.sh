@@ -87,6 +87,16 @@ if [[ ${#skipped[@]} -gt 0 ]]; then
     echo "  Unchanged: ${skipped[*]}"
 fi
 
+# Configure the statusline too. A pull alone leaves this box on claude-hud's
+# upstream defaults, which hide the weekly usage bar until it passes 80%. It is
+# a separate script because the config path must be absolute and machine-local,
+# so it cannot be a fixed file in the repo. See docs/statusline.md.
+hud_script="$(dirname "$0")/configure-hud.sh"
+if [[ -f "$hud_script" ]]; then
+    echo ""
+    bash "$hud_script"
+fi
+
 echo ""
 echo "  Backups (if written): $backup_dir/*.pre-deploy"
 echo "  Open a new shell to pick up changes."
