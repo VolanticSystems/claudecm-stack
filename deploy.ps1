@@ -1,4 +1,4 @@
-# deploy.ps1 - Install/update ClaudeCM runtime files on Windows.
+﻿# deploy.ps1 - Install/update ClaudeCM runtime files on Windows.
 #
 # Idempotent: safe to re-run after every `git pull`. Byte-identical files
 # are skipped, changed files get a timestamped backup in ~/.claudecm/backup/
@@ -101,6 +101,16 @@ if ($hadTweak) {
         Write-Host "  Uncomment the line near the top of $runtimeScript" -ForegroundColor Yellow
         Write-Host "  to restore, or see REVERT-CLAUDECM.md." -ForegroundColor Yellow
     }
+}
+
+# The statusline is configured too, because a pull alone leaves the laptop with
+# claude-hud's upstream defaults, which hide the weekly usage bar below 80%.
+# Separate script: its config path must be absolute and machine-specific, so it
+# cannot simply be a file in the repo. See docs/statusline.md.
+$hudScript = Join-Path $PSScriptRoot 'configure-hud.ps1'
+if (Test-Path $hudScript) {
+    Write-Host ""
+    & $hudScript
 }
 
 Write-Host ""

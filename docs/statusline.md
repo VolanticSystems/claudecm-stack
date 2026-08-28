@@ -76,10 +76,67 @@ without noticing, since an old build still renders a perfectly convincing HUD.
 
 ---
 
+## The weekly bar disappears in 0.8.0, and that is deliberate
+
+If you had the weekly usage bar and it vanished after upgrading, nothing is
+broken. `src/render/lines/usage.ts` decides it like this:
+
+```ts
+const sevenDayPart = (sevenDay !== null
+    && (fiveHour === null || sevenDay >= sevenDayThreshold))
+```
+
+`display.sevenDayThreshold` defaults to **80**. The 5-hour figure is almost
+always present, so in practice the weekly bar stays hidden until you have burned
+80% of your week, which is roughly the point at which it stops being useful for
+planning and starts being an alarm.
+
+Setting the threshold to **0** shows it always. Run:
+
+    ./configure-hud.ps1        # Windows
+    ./configure-hud.sh         # Linux, macOS
+
+`deploy.ps1` and `deploy.sh` call it for you, so a normal deploy already does
+this. Both scripts merge into any existing `claude-hud.json` rather than
+replacing it, so settings made with `/claude-hud:configure` survive, and both
+back the file up first. Both are idempotent, and `-WhatIfOnly` / `--what-if`
+shows what would change without writing.
+
+### Why it is a generated script and not a config file in the repo
+
+The same script also wires the **external usage snapshot**, which is what makes
+the gauges appear on the very first turn instead of after the first response:
+
+```json
+"externalUsagePath":       "<abs>/.claude/claude-hud-usage.json",
+"externalUsageWritePath":  "<abs>/.claude/claude-hud-usage.json",
+"externalUsageFreshnessMs": 604800000
+```
+
+Point the read and write paths at one file and every render that has real data
+leaves a snapshot behind, which the next new window reads immediately. Freshness
+is seven days because the default of five minutes defeats the purpose: the whole
+point is a snapshot surviving from the previous session, possibly yesterday.
+
+**Those paths must be absolute and are stored verbatim.** `validateOptionalPath`
+in `src/config.ts` is a `trim()` and nothing else. There is no `~` expansion and
+no environment expansion, and a `~/...` path **fails silently**, writing nothing
+anywhere and reporting no error. That is precisely why this is generated per
+machine rather than committed as a fixed file: a checked-in config would carry
+one machine's home directory and quietly do nothing everywhere else.
+
+**Be clear about what the first-turn numbers are.** They are the LAST KNOWN
+figures, not live ones. If you have been away a day, the weekly figure is
+yesterday's until the first real response lands, at which point it corrects
+itself. For a slow-moving weekly window that is a better answer than a blank
+bar, but it is a cached number and you should know that rather than discover it.
+
+---
+
 ## Known behaviour, not a fault
 
-**A fresh window shows only the context bar. The 5-hour and weekly gauges
-appear after the first response.**
+**Without the snapshot configured above, a fresh window shows only the context
+bar; the 5-hour and weekly gauges appear after the first response.**
 
 This is by design and will not be fixed, because it is not broken. Usage
 figures come from the `rate_limits` block that Claude Code passes to the
@@ -87,7 +144,8 @@ statusline command on stdin, and before the first API call of a session there
 is no such block to read. Earlier versions polled OAuth in the background to
 fill the gap; that was removed in favour of relying only on Claude Code's
 official stdin fields, which is the more honest design. The cost is a few
-seconds of empty gauges at startup.
+seconds of empty gauges at startup, and the snapshot above is the supported way
+to paper over it.
 
 ---
 
