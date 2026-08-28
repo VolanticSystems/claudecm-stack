@@ -84,6 +84,12 @@ node <<'NODEJS'
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Wrapped in a function ONLY so `return` is legal. This script reaches node on
+// STDIN, and node applies no CommonJS wrapper to stdin, so a top-level return is
+// an Illegal return statement. That exact bug shipped in claudecm-linux.sh and
+// went unnoticed for months because a 2>/dev/null hid the SyntaxError.
+function main() {
+
 const cfgPath  = process.env.CFG;
 const snapPath = process.env.SNAP;
 const whatIf   = process.env.WHAT_IF === '1';
@@ -148,14 +154,53 @@ try {
   ok = keys.every(k => after.display && after.display[k] === desired[k]);
 } catch (e) { ok = false; }
 
-if (ok) {
+if (!ok) {
+  console.log('  WARNING: wrote ' + cfgPath + ' but could not verify it read back correctly.');
+  process.exitCode = 1;
+  return;
+}
+
+// The config is written. Whether it does anything is a SEPARATE question, and
+// the answer is no on a machine where the plugin was never installed or the
+// statusline was never wired. Claiming "the weekly bar will now show" there is
+// a claim about a bar that does not exist, which is the same defect as
+// announcing protection for a settings write that failed. Check first.
+const claudeDir = path.dirname(cfgPath);
+const pluginRoot = path.join(claudeDir, 'plugins', 'cache', 'claude-hud', 'claude-hud');
+let pluginOk = false;
+try {
+  pluginOk = fs.readdirSync(pluginRoot)
+    .some(d => fs.existsSync(path.join(pluginRoot, d, 'dist', 'index.js')));
+} catch (e) { pluginOk = false; }
+
+let statusOk = false;
+try {
+  const sj = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf8'));
+  statusOk = !!(sj.statusLine && String(sj.statusLine.command || '').includes('claude-hud'));
+} catch (e) { statusOk = false; }
+
+if (pluginOk && statusOk) {
   console.log('  Weekly usage bar will now always show.');
   if (process.env.NO_SNAPSHOT !== '1') {
     console.log('  Gauges will also appear on the first turn, from the last snapshot.');
   }
   console.log('  Takes effect on the next statusline render; no restart needed.');
-} else {
-  console.log('  WARNING: wrote ' + cfgPath + ' but could not verify it read back correctly.');
-  process.exitCode = 1;
+  return;
 }
+
+console.log('  Config saved, but the HUD is not running on this machine yet:');
+if (!pluginOk) console.log('    - the claude-hud plugin is not installed');
+if (!statusOk) console.log('    - settings.json has no claude-hud statusLine');
+console.log('');
+console.log('  To finish, run these and restart Claude Code:');
+if (!pluginOk) {
+  console.log('    claude plugin marketplace add jarrodwatts/claude-hud');
+  console.log('    claude plugin install claude-hud@claude-hud');
+}
+if (!statusOk) console.log('    /claude-hud:setup     (inside Claude Code)');
+console.log('');
+console.log('  The settings just written will apply as soon as it runs.');
+console.log('  See docs/statusline.md; note the plain-node warning there.');
+}
+main();
 NODEJS

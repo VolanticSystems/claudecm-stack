@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Configure the claude-hud statusline so the weekly usage bar is always shown.
 
@@ -141,12 +141,51 @@ try {
     foreach ($k in $desired.Keys) { if ($after.display.$k -ne $desired[$k]) { $ok = $false } }
 } catch { $ok = $false }
 
-if ($ok) {
+if (-not $ok) {
+    Write-Host "  WARNING: wrote $hudConfig but could not verify it read back correctly." -ForegroundColor Yellow
+    return
+}
+
+# The config is written. Whether it does anything is a SEPARATE question, and
+# the answer is no on a machine where the plugin was never installed or the
+# statusline was never wired. Saying "the weekly bar will now show" there is a
+# claim about a bar that does not exist, which is the same defect as announcing
+# protection for a settings write that failed. Check before claiming.
+$pluginRoot = Join-Path $claudeDir 'plugins\cache\claude-hud\claude-hud'
+$pluginOk = $false
+if (Test-Path $pluginRoot) {
+    $pluginOk = @(Get-ChildItem $pluginRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'dist\index.js') }).Count -gt 0
+}
+
+$statusOk = $false
+$settingsPath = Join-Path $claudeDir 'settings.json'
+if (Test-Path $settingsPath) {
+    try {
+        $sj = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $statusOk = ($null -ne $sj.statusLine) -and ("$($sj.statusLine.command)" -match 'claude-hud')
+    } catch { $statusOk = $false }
+}
+
+if ($pluginOk -and $statusOk) {
     Write-Host "  Weekly usage bar will now always show." -ForegroundColor Green
     if (-not $NoSnapshot) {
         Write-Host "  Gauges will also appear on the first turn, from the last snapshot." -ForegroundColor Green
     }
     Write-Host "  Takes effect on the next statusline render; no restart needed." -ForegroundColor DarkGray
-} else {
-    Write-Host "  WARNING: wrote $hudConfig but could not verify it read back correctly." -ForegroundColor Yellow
+    return
 }
+
+Write-Host "  Config saved, but the HUD is not running on this machine yet:" -ForegroundColor Yellow
+if (-not $pluginOk) { Write-Host "    - the claude-hud plugin is not installed" -ForegroundColor Yellow }
+if (-not $statusOk) { Write-Host "    - settings.json has no claude-hud statusLine" -ForegroundColor Yellow }
+Write-Host ""
+Write-Host "  To finish, run these and restart Claude Code:" -ForegroundColor Cyan
+if (-not $pluginOk) {
+    Write-Host "    claude plugin marketplace add jarrodwatts/claude-hud" -ForegroundColor Cyan
+    Write-Host "    claude plugin install claude-hud@claude-hud" -ForegroundColor Cyan
+}
+if (-not $statusOk) { Write-Host "    /claude-hud:setup     (inside Claude Code)" -ForegroundColor Cyan }
+Write-Host ""
+Write-Host "  The settings this script just wrote will apply as soon as it runs." -ForegroundColor DarkGray
+Write-Host "  See docs/statusline.md; note the plain-node warning there." -ForegroundColor DarkGray
