@@ -1914,6 +1914,41 @@ Structural-Case -Name 'the suite never re-wraps a comma-returned array' `
         }
     }
 
+# ------------------------------------------------- search accepts all four forms
+#
+# Structural rather than behavioural because the dispatch lives in the BODY of
+# `claudecm`, not in a nested function, so the AST lifting the rest of this
+# suite relies on cannot reach it.
+#
+# This is a regression test with a specific history: search shipped accepting
+# only -s and -S, while list mode had always accepted l, L, -l and -L. Bob typed
+# `claudecm s` and it fell through to the pass-through branch, handing "s" to
+# claude as an argument. Two verbs in one dispatch disagreeing about their own
+# calling convention is the defect; the fix is that they agree.
+
+Structural-Case -Name 'search mode accepts s, S, -s and -S' `
+    -Sabotage 'drop the bare-letter arms, leaving only the dashed forms, which is the shipped bug' `
+    -Mutate @{ Find    = "`$firstArg -eq 's' -or `$firstArg -eq 'S' -or "
+               Replace = "" } `
+    -Body {
+        param($ModuleText)
+        # Comments stripped first: the comment above the dispatch names the
+        # forms in prose, and a guard that cannot tell an explanation from code
+        # is the defect that once made a structural test bind a comment.
+        $code = ($ModuleText -split "`n" | ForEach-Object { $_ -replace '#.*$','' }) -join "`n"
+
+        $line = ($code -split "`n" | Where-Object { $_ -match "-eq\s+'-s'" } | Select-Object -First 1)
+        if (-not $line) { throw "$script:AssertSentinel could not find the search dispatch line at all" }
+
+        foreach ($form in @('s','S','-s','-S')) {
+            # -cmatch: this is the one place case matters, since the whole point
+            # is that each spelling is present in the source.
+            if ($line -cnotmatch [regex]::Escape("'$form'")) {
+                throw "$script:AssertSentinel search dispatch does not accept '$form'; list mode accepts l/L/-l/-L and search must match, or `claudecm s` silently passes 's' through to claude"
+            }
+        }
+    }
+
 # --------------------------------------------------------------- seam fidelity
 #
 # The whole PowerShell suite rests on one unproven claim: that a function

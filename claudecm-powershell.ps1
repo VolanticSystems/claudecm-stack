@@ -1353,11 +1353,15 @@ IMPORTANT:
     # Search mode: show only the sessions whose name contains <text>.
     # The list has outgrown one screen, so this is how you find one without
     # scrolling. Numbers shown are positions in the FILTERED list.
-    if ($firstArg -eq '-s' -or $firstArg -eq '-S') {
+    # All four forms, matching list mode's l / L / -l / -L. PowerShell's -eq is
+    # case-insensitive so the upper-case arms are redundant here, but they are
+    # spelled out to mirror the rest of this dispatch and the bash module, where
+    # [[ == ]] IS case-sensitive and every arm is load-bearing.
+    if ($firstArg -eq 's' -or $firstArg -eq 'S' -or $firstArg -eq '-s' -or $firstArg -eq '-S') {
         $term = [string]$args[1]
         if (-not $term.Trim()) {
             Write-Host ""
-            Write-Host "  Usage: claudecm -s <text>"
+            Write-Host "  Usage: claudecm s <text>      (s, S, -s and -S all work)"
             Write-Host "  Lists only the sessions whose name contains <text>, case-insensitive."
             Write-Host ""
             return
