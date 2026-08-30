@@ -623,6 +623,28 @@ t_backup_dirs_distinct() {
     return 0
 }
 
+t_search_accepts_all_four_forms() {
+    # Regression test with a history: search shipped accepting only -s and -S
+    # while list mode had always accepted l, L, -l and -L. `claudecm s` then
+    # fell through to the pass-through branch and handed "s" to claude as an
+    # argument. Two verbs in one dispatch disagreeing about their own calling
+    # convention is the defect.
+    #
+    # Structural, because the dispatch is in the body of claudecm() and the
+    # search view blocks on read; asserting the source is the honest test here.
+    local line
+    line=$(grep -F 'if [[ "$first" == ' "$__CM_TEST_MODULE" | grep -F '"-s"' | head -1)
+    [[ -n "$line" ]] || { echo "           search dispatch line not found in module" >&2; return 90; }
+    local f
+    for f in s S -s -S; do
+        [[ "$line" == *"\"$f\""* ]] || {
+            echo "           search dispatch does not accept \"$f\"; list mode accepts l/L/-l/-L and search must match" >&2
+            return 90
+        }
+    done
+    return 0
+}
+
 # ================================================================== the runner
 
 echo ""
@@ -1000,6 +1022,10 @@ test_case "ensure_cleanup_period_days raises retention and says so" \
 test_case "ensure_cleanup_period_days never claims protection it did not apply" \
     "announce unconditionally instead of checking what actually landed on disk, the bug this test was written for" \
     's@(( after >= 1000 )); then@true; then@' t_cleanup_does_not_claim_what_it_did_not_do
+
+test_case "search mode accepts s, S, -s and -S" \
+    "drop the bare-letter arms, leaving only the dashed forms, which is the shipped bug" \
+    's@"\$first" == "s" || "\$first" == "S" || @@' t_search_accepts_all_four_forms
 
 echo ""
 TOTAL=$((PASS+FAIL+HOLLOW+STALE+ERROR+INCONC))

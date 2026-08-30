@@ -8,7 +8,8 @@ A wrapper for Claude Code that adds session management: named sessions, resume b
 claudecm                       Launch Claude normally
 claudecm l  (or L)             List saved sessions, pick to resume
 claudecm 3                     Resume session #3 directly
-claudecm -s context            List only sessions whose name contains 'context'
+claudecm s context             List only sessions whose name contains 'context'
+claudecm -s context            Same. s, S, -s and -S all work
 claudecm --proj C:\myproject   Launch in a specific project directory
 ```
 
@@ -22,7 +23,8 @@ On exit from Claude, you're prompted to name the session. Named sessions are sav
 
 ### Search
 
-`claudecm -s <text>` lists only the sessions whose name contains `<text>`,
+`claudecm s <text>` lists only the sessions whose name contains `<text>`,
+(`s`, `S`, `-s` and `-S` are all accepted, matching list mode's `l`/`L`/`-l`/`-L`)
 case-insensitively. It exists because the list outgrows a screen: instead of
 scrolling past fifty rows you pick from the two or three that matched.
 

@@ -1577,11 +1577,14 @@ claudecm() {
     # Search mode: show only the sessions whose name contains <text>.
     # The list has outgrown one screen, so this is how you find one without
     # scrolling. Numbers shown are positions in the FILTERED list.
-    if [[ "$first" == "-s" || "$first" == "-S" ]]; then
+    # All four forms, matching list mode's l / L / -l / -L above. Unlike
+    # PowerShell's -eq, bash [[ == ]] is case-sensitive, so each arm is
+    # load-bearing here.
+    if [[ "$first" == "s" || "$first" == "S" || "$first" == "-s" || "$first" == "-S" ]]; then
         local term="${2:-}"
         if [[ -z "${term// }" ]]; then
             __cm_blank
-            __cm_say "Usage: claudecm -s <text>"
+            __cm_say "Usage: claudecm s <text>      (s, S, -s and -S all work)"
             __cm_say "Lists only the sessions whose name contains <text>, case-insensitive."
             __cm_blank
             return

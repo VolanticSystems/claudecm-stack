@@ -46,7 +46,7 @@ ClaudeCM gives you:
 
 - **Resume by number.** `claudecm 3` gets you back into session 3. One command.
 
-- **Search when the list gets long.** `claudecm -s context` lists only the sessions whose name contains "context", numbered within that filtered list, so you pick from three rows instead of scrolling past fifty. Case-insensitive, matches the name you gave the session rather than its path, and covers the live list only. Search mode never offers to create a project, so a mistyped number stays a mistyped number.
+- **Search when the list gets long.** `claudecm s context` lists only the sessions whose name contains "context", numbered within that filtered list, so you pick from three rows instead of scrolling past fifty. Case-insensitive, matches the name you gave the session rather than its path, and covers the live list only. Search mode never offers to create a project, so a mistyped number stays a mistyped number.
 
 - **Session detection.** Run `claudecm` in a project directory and it finds your existing session automatically. No session found? It offers to create one with a name you choose.
 
