@@ -22,10 +22,10 @@ The whole sequence, because the pieces have to happen in this order and
 
     claude plugin marketplace add jarrodwatts/claude-hud
     claude plugin install claude-hud@claude-hud
-    # restart Claude Code, then inside it:
-    /claude-hud:setup
-    # then, from the repo:
-    .\deploy.ps1          # Windows   (or ./deploy.sh on Linux)
+    /claude-hud:setup     # inside Claude Code, OR write the statusLine key
+                          # directly: see the next section, which is the
+                          # better route and needs no restart mid-way
+    .\deploy.ps1          # Windows   (or ./deploy.sh on Linux), from the repo
 
 `deploy` runs `configure-hud`, which sets the weekly-bar threshold and the
 first-turn snapshot described below. Running it before the plugin exists is
