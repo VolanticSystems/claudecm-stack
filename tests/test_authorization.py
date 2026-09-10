@@ -229,6 +229,44 @@ hcheck("a bare approval is refused for scope", decision(out) == "deny", out[:200
 hcheck("and it asks him to name the work", "named" in out or "name" in out, out[:250])
 
 print("")
+print("rule 1: compound verb phrases (the action word is not first)")
+print("")
+
+# 2026-09-10, the third false positive of the day. "Double check" is an
+# instruction whose verb sits in second position. Reading only the first word
+# finds `double`, which is in no list, so the message fell through to
+# "ambiguous stops" and refused everything.
+check("work", "The report was updated. Double check.",
+      "THE THIRD BREAK: a compound verb, refused")
+for p in [
+    "Double check the report.",
+    "go look at the transcript",
+    "take a look at the diff",
+    "come back and read the file",
+    "try running the suite again",
+    "keep going on item three",
+]:
+    check("work", p)
+
+# The question-opener skip must survive: an action verb after an interrogative
+# is still a question, however many verbs follow it.
+for p in [
+    "should we double check that?",
+    "can you take a look?",
+    "did you go look at it?",
+]:
+    check("words", p, "a question containing an action verb is still a question")
+
+# Articles are not verb prefixes. If they were, a plain statement whose second
+# word happens to be an action verb would read as authorisation.
+for p in [
+    "the review is done",
+    "the audit found nothing",
+    "a test failed",
+]:
+    check("words", p, "a statement must not become an instruction")
+
+print("")
 print("rule 1: harness events are not messages from Bob")
 print("")
 
@@ -279,6 +317,45 @@ run(CLASSIFY, {"prompt": NOTIF, "session_id": "n3", "prompt_id": "s1"})
 rc, out = call(session="n3", prompt_id="s1")
 hcheck("a notification with no prior verdict allows (writes nothing)",
        decision(out) is None, out[:200])
+
+print("")
+print("rule 1: the refusal log")
+print("")
+
+shutil.rmtree(STATE, ignore_errors=True)
+LOG = os.path.join(STATE, "refusals.log")
+
+turn("the thing about the panel", session="L1", prompt_id="L1a")
+call(session="L1", prompt_id="L1a")
+hcheck("a refusal is logged", os.path.isfile(LOG))
+if os.path.isfile(LOG):
+    body = open(LOG, encoding="utf-8").read()
+    hcheck("the log records the phrasing that tripped it",
+           "the thing about the panel" in body, body[:200])
+    hcheck("and the verdict", "words" in body, body[:200])
+
+turn("commit and push it", session="L2", prompt_id="L2a")
+call(session="L2", prompt_id="L2a")
+before = open(LOG, encoding="utf-8").read().count("\n") if os.path.isfile(LOG) else 0
+hcheck("an ALLOWED call is not logged (the log is refusals only)",
+       before == 1, "lines: %d" % before)
+
+# The log must never be able to change the decision or break the guard.
+os.makedirs(STATE, exist_ok=True)
+try:
+    os.chmod(LOG, 0o444)
+except Exception:
+    pass
+turn("another vague thing", session="L3", prompt_id="L3a")
+rc, out = call(session="L3", prompt_id="L3a")
+hcheck("an unwritable log still refuses correctly",
+       decision(out) == "deny" and rc == 0, (rc, out[:120]))
+try:
+    os.chmod(LOG, 0o644)
+except Exception:
+    pass
+
+shutil.rmtree(STATE, ignore_errors=True)
 
 print("")
 print("rule 1: fail-open (must never be the reason work cannot start)")

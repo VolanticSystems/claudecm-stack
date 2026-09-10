@@ -132,6 +132,24 @@ def main():
     # It cannot wedge a session: the verdict is scoped to one prompt_id and
     # expires by WINDOW_SECONDS, and every failure path above allows.
 
+    # Log every refusal. Three false positives surfaced on 2026-09-10 and each
+    # was found only because it happened to block something Bob was watching:
+    # an indirect instruction, a harness event, and a compound verb. Without a
+    # record the rate is invisible and the word lists only ever improve by
+    # anecdote. One line each, appended, never allowed to affect the decision.
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "refusals.log"), "a",
+                  encoding="utf-8") as fh:
+            fh.write("%s\t%s\t%s\t%s\t%s\n" % (
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                verdict,
+                (payload.get("tool_name") or "?"),
+                (state.get("reason") or "").replace("\t", " ")[:70],
+                (state.get("excerpt") or "").replace("\t", " ").replace("\n", " ")[:110]))
+    except Exception:
+        pass
+
     template = WORDS_MESSAGE if verdict == "words" else NAME_IT_MESSAGE
     reason = template.format(
         excerpt=(state.get("excerpt") or "")[:140].replace("\n", " "),
