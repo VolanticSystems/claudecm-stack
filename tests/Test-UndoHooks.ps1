@@ -50,7 +50,11 @@ $realistic = @'
     "PreToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-bash.py\"", "timeout": 10 } ] },
       { "matcher": "Write|Edit", "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/guard-write.py\"", "timeout": 10 } ] },
-      { "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/guard-tool.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/guard-tool.py\"", "timeout": 10 } ] },
+      { "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/guard-authorization.py\"", "timeout": 10 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/classify-prompt.py\"", "timeout": 10 } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "python \"~/.claude/hooks/check-output.py\"", "timeout": 10 } ] }
@@ -81,6 +85,10 @@ Check 'strip: guard-bash is gone' ($after -notmatch 'guard-bash')
 Check 'strip: guard-write is gone' ($after -notmatch 'guard-write')
 Check 'strip: check-output is gone' ($after -notmatch 'check-output')
 Check 'strip: guard-tool is gone' ($after -notmatch 'guard-tool')
+# The rule-1 pair matters most here: if the undo cannot remove them, Bob's
+# escape hatch does not cover the guard most likely to be in his way.
+Check 'strip: guard-authorization is gone' ($after -notmatch 'guard-authorization')
+Check 'strip: classify-prompt is gone (a UserPromptSubmit hook, not PreToolUse)' ($after -notmatch 'classify-prompt')
 Check 'strip: the cmv PreCompact hook SURVIVES' ($after -match 'cmv auto-trim')
 Check 'strip: the cmv PostToolUse hook SURVIVES' ($after -match 'check-size')
 Check 'strip: unrelated keys survive (statusLine)' ($null -ne $json.statusLine)

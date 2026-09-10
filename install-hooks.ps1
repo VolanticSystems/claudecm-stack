@@ -44,7 +44,8 @@ $settings  = Join-Path $claudeDir 'settings.json'
 $agreement = Join-Path $claudeDir 'agreement.md'
 $backup    = if ($BackupPath) { $BackupPath } else { Join-Path $env:USERPROFILE '.claudecm\backup\settings.json.pre-hooks' }
 
-$scripts = @('lib_agreement.py', 'guard-bash.py', 'guard-write.py', 'guard-tool.py')
+$scripts = @('lib_agreement.py', 'guard-bash.py', 'guard-write.py', 'guard-tool.py',
+             'lib_authorization.py', 'classify-prompt.py', 'guard-authorization.py')
 
 $script:problems = @()
 function Fault([string]$m) { $script:problems += $m; Write-Output "  FAIL   $m" }
@@ -183,6 +184,8 @@ if (-not $json.hooks.PSObject.Properties.Name.Contains('PreToolUse')) {
 $bashCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-bash.py"'
 $writeCmd = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-write.py"'
 $toolCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-tool.py"'
+$authCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-authorization.py"'
+$clsCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/classify-prompt.py"'
 
 # Drop any previous copy of ours first, so re-running does not duplicate.
 $kept = @($json.hooks.PreToolUse | Where-Object {
@@ -203,7 +206,27 @@ $kept += [pscustomobject]@{
 $kept += [pscustomobject]@{
     hooks   = @([pscustomobject]@{ type = 'command'; command = $toolCmd; timeout = 15 })
 }
+# Also unmatched: the rule-1 guard asks whether THIS TURN may contain any tool
+# call, which is a question about the turn rather than about the tool.
+$kept += [pscustomobject]@{
+    hooks   = @([pscustomobject]@{ type = 'command'; command = $authCmd; timeout = 15 })
+}
 $json.hooks.PreToolUse = $kept
+
+# UserPromptSubmit: classify Bob's message before any tool runs. This hook
+# decides nothing and never blocks a prompt; it only writes the verdict the
+# rule-1 guard reads.
+if (-not $json.hooks.PSObject.Properties.Name.Contains('UserPromptSubmit')) {
+    $json.hooks | Add-Member -NotePropertyName UserPromptSubmit -NotePropertyValue @()
+}
+$keptPrompt = @($json.hooks.UserPromptSubmit | Where-Object {
+    $entry = $_
+    -not (@($entry.hooks) | Where-Object { $_.command -match 'classify-prompt\.py' })
+})
+$keptPrompt += [pscustomobject]@{
+    hooks = @([pscustomobject]@{ type = 'command'; command = $clsCmd; timeout = 15 })
+}
+$json.hooks.UserPromptSubmit = $keptPrompt
 
 # -Depth 20 is load-bearing: the default of 2 flattens nested arrays to strings.
 $json | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
@@ -220,6 +243,11 @@ if (-not $reparsed) {
     if ($after -match 'guard-bash\.py') { Good "guard-bash is wired" } else { Fault "guard-bash is not in the file" }
     if ($after -match 'guard-write\.py') { Good "guard-write is wired" } else { Fault "guard-write is not in the file" }
     if ($after -match 'guard-tool\.py') { Good "guard-tool is wired" } else { Fault "guard-tool is not in the file" }
+    # These two were added later and were NOT checked here at first, so the
+    # installer reported success having verified three of five guards. Verify
+    # what you are claiming, not that the write returned.
+    if ($after -match 'guard-authorization\.py') { Good "guard-authorization is wired" } else { Fault "guard-authorization is not in the file" }
+    if ($after -match 'classify-prompt\.py') { Good "classify-prompt is wired (UserPromptSubmit)" } else { Fault "classify-prompt is not in the file" }
     $cmv = ($after -match 'cmv auto-trim')
     if ($cmv) { Good "the cmv trimmer survived" }
 }
@@ -231,7 +259,21 @@ if ($script:problems.Count -gt 0) {
     exit 1
 }
 
-Write-Output 'INSTALLED, and inert: no rules are in force yet.'
+# Report the ACTUAL rule count rather than assuming a first install. This line
+# used to say "inert: no rules are in force yet" unconditionally, which was a
+# lie on every reinstall after the first.
+$ruleCount = '(could not read)'
+try {
+    $listing = & python (Join-Path $dstHooks 'lib_agreement.py') --list 2>&1 | Out-String
+    if ($listing -match '(\d+)\s+rule\(s\) in force') { $ruleCount = $Matches[1] }
+} catch { }
+
+if ($ruleCount -eq '0') {
+    Write-Output 'INSTALLED, and inert: no rules are in force yet.'
+} else {
+    Write-Output "INSTALLED. $ruleCount rule(s) are in force. The rule-1 guard is active:"
+    Write-Output "  a message with no clear instruction now refuses tool calls."
+}
 Write-Output ''
 Write-Output "Edit your rules here:  $agreement"
 Write-Output "Test a rule first:     python `"$dstHooks\lib_agreement.py`" --list"
