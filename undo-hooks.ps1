@@ -46,7 +46,9 @@ $backupDir = Split-Path $backup
 
 # Every script the work agreement installs. An entry whose command mentions any
 # of these is ours and is removed; anything else is left alone.
-$guardScripts = @('guard-bash.py', 'guard-write.py', 'guard-tool.py', 'check-output.py', 'rule-check.py', 'guard-scope.py')
+$guardScripts = @('guard-bash.py', 'guard-write.py', 'guard-tool.py',
+                  'guard-authorization.py', 'classify-prompt.py',
+                  'check-output.py', 'rule-check.py', 'guard-scope.py')
 
 function Test-GuardFree {
     <# Read the file back off disk and prove the guards are gone. Verifying the
