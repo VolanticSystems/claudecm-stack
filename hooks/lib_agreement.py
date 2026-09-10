@@ -51,7 +51,11 @@ VALID_SURFACES = ("bash", "write", "path", "tool", "output")
 # documented route to that is the transcript, which can lag the turn, so it was
 # left unbuilt rather than shipped unproven. Remove a surface from here the day
 # a guard reads it.
-UNWIRED_SURFACES = ("output",)
+# `output` was here until 2026-09-10, when guard-output.py was built: a Stop
+# hook reads `last_assistant_message` straight from its payload, so Claude's own
+# prose is now checkable. Leaving the flag set after wiring the surface made
+# every command carry an "in force but inert" note, which is how it was caught.
+UNWIRED_SURFACES = ()
 
 # Rules are read only from between these. See load().
 BEGIN_MARKER = "AGREEMENT:BEGIN"

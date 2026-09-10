@@ -132,21 +132,36 @@ try:
     # The worst failure this system can have: a rule sitting above the marker,
     # looking enforced, that no guard reads. It must be impossible to hit
     # silently, so the loader names it every single time.
+    # Every surface is wired as of 2026-09-10, so the mechanism is exercised by
+    # declaring one unwired for the length of this check rather than by relying
+    # on `output` being the odd one out. The protection is against a FUTURE
+    # surface being added and left unread, which is what it was built for.
     p = make_agreement(tmp, [
-        "| styled | output | `SOMETHING` | warn | no guard reads output yet |",
+        "| styled | output | `SOMETHING` | warn | pretend nothing reads this |",
         "| real | bash | `SOMETHING` | deny | this one does fire |",
     ])
-    rules, problems = lib_agreement.load(p)
-    check("an unwired-surface rule still loads (it is valid, just inert)",
-          any(r.slug == "styled" for r in rules), str(rules))
-    check("but it is reported as IN FORCE BUT INERT",
-          any("INERT" in x and "styled" in x for x in problems), str(problems))
-    check("and a wired rule beside it is NOT flagged",
-          not any("real" in x for x in problems), str(problems))
+    _saved = lib_agreement.UNWIRED_SURFACES
+    lib_agreement.UNWIRED_SURFACES = ("output",)
+    try:
+        rules, problems = lib_agreement.load(p)
+        check("an unwired-surface rule still loads (it is valid, just inert)",
+              any(r.slug == "styled" for r in rules), str(rules))
+        check("but it is reported as IN FORCE BUT INERT",
+              any("INERT" in x and "styled" in x for x in problems), str(problems))
+        check("and a wired rule beside it is NOT flagged",
+              not any("real" in x for x in problems), str(problems))
+    finally:
+        lib_agreement.UNWIRED_SURFACES = _saved
 
-    rc, out, _ = run_hook(GUARD_BASH, bash_payload("echo SOMETHING"), p)
-    check("the guard passes the inert warning through to the session",
-          "INERT" in out, out[:300])
+    # And the regression that this replaced: with nothing unwired, an ordinary
+    # command must carry NO note at all. Leaving `output` flagged after wiring
+    # it made every single command emit one, which broke six other checks.
+    rules, problems = lib_agreement.load(p)
+    check("with every surface wired, no rule is flagged inert",
+          not any("INERT" in x for x in problems), str(problems))
+    rc, out, _ = run_hook(GUARD_BASH, bash_payload("echo harmless"), p)
+    check("and an unmatched command emits nothing at all",
+          out.strip() == "", out[:200])
 
     # The shipped file must not carry an inert rule above the marker.
     _, shipped_problems = lib_agreement.load(AGREEMENT)

@@ -45,7 +45,8 @@ $agreement = Join-Path $claudeDir 'agreement.md'
 $backup    = if ($BackupPath) { $BackupPath } else { Join-Path $env:USERPROFILE '.claudecm\backup\settings.json.pre-hooks' }
 
 $scripts = @('lib_agreement.py', 'guard-bash.py', 'guard-write.py', 'guard-tool.py',
-             'lib_worklog.py', 'record-prompt.py', 'guard-worklog.py')
+             'lib_worklog.py', 'record-prompt.py', 'guard-worklog.py',
+             'guard-output.py')
 
 $script:problems = @()
 function Fault([string]$m) { $script:problems += $m; Write-Output "  FAIL   $m" }
@@ -186,6 +187,7 @@ $writeCmd = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-write.py"'
 $toolCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-tool.py"'
 $workCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-worklog.py"'
 $recCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/record-prompt.py"'
+$outCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-output.py"'
 
 # Drop any previous copy of ours first, so re-running does not duplicate.
 $kept = @($json.hooks.PreToolUse | Where-Object {
@@ -228,6 +230,21 @@ $keptPrompt += [pscustomobject]@{
 }
 $json.hooks.UserPromptSubmit = $keptPrompt
 
+# Stop: check the message just written against the `output` rules. This is the
+# only hook that can see Claude's own prose, via last_assistant_message in the
+# payload. It refuses to block twice in one turn, so it cannot spin a session.
+if (-not $json.hooks.PSObject.Properties.Name.Contains('Stop')) {
+    $json.hooks | Add-Member -NotePropertyName Stop -NotePropertyValue @()
+}
+$keptStop = @($json.hooks.Stop | Where-Object {
+    $entry = $_
+    -not (@($entry.hooks) | Where-Object { $_.command -match 'guard-output\.py|check-output\.py' })
+})
+$keptStop += [pscustomobject]@{
+    hooks = @([pscustomobject]@{ type = 'command'; command = $outCmd; timeout = 15 })
+}
+$json.hooks.Stop = $keptStop
+
 # -Depth 20 is load-bearing: the default of 2 flattens nested arrays to strings.
 $json | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
 Good "wrote settings.json"
@@ -248,6 +265,7 @@ if (-not $reparsed) {
     # what you are claiming, not that the write returned.
     if ($after -match 'guard-worklog\.py') { Good "guard-worklog is wired" } else { Fault "guard-worklog is not in the file" }
     if ($after -match 'record-prompt\.py') { Good "record-prompt is wired (UserPromptSubmit)" } else { Fault "record-prompt is not in the file" }
+    if ($after -match 'guard-output\.py') { Good "guard-output is wired (Stop)" } else { Fault "guard-output is not in the file" }
     # Nothing may reference a script that is not on disk. That is the exact
     # shape of the 2026-09-10 wedge: settings pointed at a deleted file, Python
     # exited non-zero, and every tool call in every session was refused.
@@ -278,8 +296,9 @@ try {
 if ($ruleCount -eq '0') {
     Write-Output 'INSTALLED, and inert: no rules are in force yet.'
 } else {
-    Write-Output "INSTALLED. $ruleCount rule(s) are in force. The rule-1 guard is active:"
-    Write-Output "  a message with no clear instruction now refuses tool calls."
+    Write-Output "INSTALLED. $ruleCount rule(s) are in force."
+    Write-Output "  Reads are never gated. A state change needs an open task in"
+    Write-Output "  hooks\state\current-task.json citing something you actually said."
 }
 Write-Output ''
 Write-Output "Edit your rules here:  $agreement"

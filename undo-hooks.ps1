@@ -47,7 +47,7 @@ $backupDir = Split-Path $backup
 # Every script the work agreement installs. An entry whose command mentions any
 # of these is ours and is removed; anything else is left alone.
 $guardScripts = @('guard-bash.py', 'guard-write.py', 'guard-tool.py',
-                  'guard-worklog.py', 'record-prompt.py',
+                  'guard-worklog.py', 'record-prompt.py', 'guard-output.py',
                   # Retired names, kept so an undo still cleans a machine that
                   # was installed before they were removed.
                   'guard-authorization.py', 'classify-prompt.py',
