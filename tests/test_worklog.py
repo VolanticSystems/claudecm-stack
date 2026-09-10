@@ -91,7 +91,6 @@ for tool, ti in [
     ("Bash", {"command": "grep -rn 'thing' ."}),
     ("Bash", {"command": "git status --short"}),
     ("Bash", {"command": "git log --oneline -5"}),
-    ("Bash", {"command": "python tests/test_worklog.py"}),
     ("Bash", {"command": "find . -name '*.md'"}),
     ("Bash", {"command": "wc -l < file.txt"}),
 ]:
@@ -130,7 +129,6 @@ for cmd in [
     "cat payload.json 2>/dev/null",
     "grep -rn thing . 2>/dev/null",
     "git status --short 2>&1",
-    "python tests/test_worklog.py 2>&1 | tail -1",
     "ls -d /f/Backups/* 2>$null",
     "find . -name '*.md' 2>/dev/null | head",
     "wc -l < somefile.txt",
@@ -167,7 +165,12 @@ for cmd in [
 for cmd in [
     """python -c "print(open('x.md').read())" """,
     """python -c "import json,io; print(json.load(io.open('c.json')))" """,
-    "python tests/test_worklog.py",
+    # NOTE: `python tests/test_worklog.py` is deliberately NOT here. Since the
+    # guard reads the script it is asked to run, a suite that creates scratch
+    # files is correctly seen as changing the machine, and needs a task like
+    # anything else. That is real friction on a common action, and it is the
+    # honest reading of "only Bob creates work" rather than a carve-out by
+    # filename, which anyone could then use by calling a file test_something.
 ]:
     got, _ = call("Bash", {"command": cmd})
     check("not gated: %s" % cmd.strip()[:52], got == "allow", got)
@@ -406,6 +409,58 @@ check("and the new entry lands in the fresh file", "written after the roll" in b
 rolled = [f for f in os.listdir(lib_worklog.RECORDS_DIR)
           if f.startswith("worklog-") and f.endswith(".md")]
 check("the old content is kept under a dated name", len(rolled) == 1, str(rolled))
+
+print("")
+print("work record: a named script is READ, not guessed at")
+print("")
+
+# This was written off as unclosable: `python somescript.py` may read or may
+# rewrite the disk, and the command line does not say which. That gave up one
+# step early. The command line does not say; the FILE does.
+fresh()
+scratch = os.path.join(REPO, "temp", "worklog-script-tests")
+shutil.rmtree(scratch, ignore_errors=True)
+os.makedirs(scratch, exist_ok=True)
+
+
+def script(name, body):
+    p = os.path.join(scratch, name)
+    io.open(p, "w", encoding="utf-8", newline="\n").write(body)
+    return p
+
+
+reader = script("reads.py", "import io\nprint(io.open('x.txt').read())\n")
+writer = script("writes.py", "import io\nio.open('x.txt','w').write('hi')\n")
+remover = script("removes.py", "import os\nos.remove('x.txt')\n")
+mover = script("moves.py", "import shutil\nshutil.move('a','b')\n")
+ps_writer = script("writes.ps1", "Set-Content -Path x.txt -Value hi\n")
+node_writer = script("writes.js", "require('fs').writeFileSync('x','y')\n")
+
+for label, path, want in [
+    ("a script that only reads", reader, "allow"),
+    ("a script that opens a file for writing", writer, "deny"),
+    ("a script that removes a file", remover, "deny"),
+    ("a script that moves a file", mover, "deny"),
+    ("a PowerShell script that writes", ps_writer, "deny"),
+    ("a node script that writes", node_writer, "deny"),
+]:
+    runner = "pwsh -File" if path.endswith(".ps1") else (
+        "node" if path.endswith(".js") else "python")
+    got, _ = call("Bash", {"command": "%s %s" % (runner, path)})
+    check("%s -> %s" % (label, want), got == want, got)
+
+# Unreadable means mutating: the safe direction. Being wrong costs one sentence
+# opening a task; the opposite costs a silent change to Bob's machine.
+got, _ = call("Bash", {"command": "python %s/does-not-exist.py" % scratch})
+check("a script that cannot be found is assumed to write", got == "deny", got)
+
+# The reading script must stay allowed even with arguments and redirection of
+# stderr, which is how these are actually invoked.
+got, _ = call("Bash", {"command": "python %s --flag 2>/dev/null | tail -1" % reader})
+check("a reading script with args and 2>/dev/null stays allowed",
+      got == "allow", got)
+
+shutil.rmtree(scratch, ignore_errors=True)
 
 print("")
 print("work record: THE WEDGE. One session must not evict another's licence")

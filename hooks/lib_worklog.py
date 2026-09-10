@@ -141,16 +141,12 @@ MUTATING_BASH = (
     r"writeFileSync|os\.remove|shutil\.|os\.replace|os\.rename)",
 )
 
-# THE HONEST LIMIT, stated here rather than discovered later.
+# A NAMED SCRIPT IS READ, NOT GUESSED AT.
 #
-# Detecting what an arbitrary script does is not possible from its command
-# line. `python somescript.py` may read or may rewrite the disk, and nothing
-# above can tell which. The inline case is covered because that is the shape
-# actually reached for when writing a quick file, but a named script is not.
-#
-# This is a real hole and it is not closable by pattern matching. What limits
-# it is that running a script to change things IS the work, so the task should
-# already be open; the gate is a reminder at the moment of action, not a sandbox.
+# This was written off as unclosable: `python somescript.py` may read or may
+# rewrite the disk and the command line does not say which. That was giving up
+# one step early. The command line does not say, but the FILE does, and the
+# guard can open it. See _script_writes below.
 
 # Things Bob says when I have gone past the line. Recorded loudly, because he
 # asked for exactly that: "one thing I definitely want you to record with big
@@ -445,7 +441,77 @@ def close_task(reason="finished", session_id=None):
 
 # ---------------------------------------------------------------- the gate
 
-def is_mutating(tool_name, tool_input):
+# Interpreters whose script argument is worth opening and reading.
+_INTERPRETERS = re.compile(
+    r"\b(?:python3?|pwsh|powershell|node|ruby|perl|bash|sh)\b[^|;&]*?"
+    r"(?:-File\s+)?([\"']?)([^\s\"';|&]+\.(?:py|ps1|js|rb|pl|sh))\1",
+    re.IGNORECASE)
+
+# What, inside a script, means it changes something. Deliberately broad: a
+# false positive costs one sentence opening a task, a false negative is a
+# silent write.
+_SCRIPT_WRITES = re.compile(
+    r"open\s*\([^)]*,\s*['\"][wax]"          # python write modes
+    r"|\.write\s*\(|\.writelines\s*\("
+    r"|os\.(remove|unlink|rmdir|replace|rename|makedirs|mkdir)"
+    r"|shutil\.(move|copy|copy2|copytree|rmtree)"
+    r"|pathlib[^\n]*write_(text|bytes)|\.write_(text|bytes)\s*\("
+    r"|subprocess[^\n]*\b(rm|mv|cp|git\s+commit|git\s+push)\b"
+    r"|Set-Content|Add-Content|Out-File|Remove-Item|New-Item|Move-Item"
+    r"|Copy-Item|Rename-Item|Register-ScheduledTask"
+    r"|writeFileSync|unlinkSync|mkdirSync|rmSync|renameSync"
+    r"|File\.(WriteAll|Delete|Move|Copy)"
+    r"|\brm\s|\bmv\s|\bcp\s|\bmkdir\s|>>?\s*[^\s&|>]",
+    re.IGNORECASE)
+
+# A script larger than this is not scanned; it is assumed to write. Reading a
+# huge file on every tool call would be the wrong trade, and a big script is
+# more likely to change something anyway.
+_MAX_SCRIPT_BYTES = 512 * 1024
+
+
+def _script_writes(command, cwd=None):
+    """(verdict, why) for a command that runs a script file.
+
+    Returns None when the command runs no script this can find, so the caller
+    falls through to the ordinary patterns.
+
+    UNREADABLE MEANS MUTATING. If the file cannot be found or opened, the guard
+    assumes it writes. That is the safe direction: the cost of being wrong is
+    that a task has to be opened, and the cost of the opposite is a silent
+    change to Bob's machine.
+    """
+    m = _INTERPRETERS.search(command or "")
+    if not m:
+        return None, ""
+    raw = m.group(2)
+
+    candidates = []
+    if os.path.isabs(raw):
+        candidates.append(raw)
+    else:
+        for base in (cwd, os.getcwd()):
+            if base:
+                candidates.append(os.path.join(base, raw))
+    for path in candidates:
+        try:
+            if not os.path.isfile(path):
+                continue
+            if os.path.getsize(path) > _MAX_SCRIPT_BYTES:
+                return True, "%s is too large to scan; assumed to write" % raw
+            with io.open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except Exception:
+            return True, "%s could not be read; assumed to write" % raw
+        hit = _SCRIPT_WRITES.search(body)
+        if hit:
+            return True, "%s writes (%s)" % (raw, hit.group(0).strip()[:40])
+        return False, "%s only reads" % raw
+
+    return True, "%s was not found; assumed to write" % raw
+
+
+def is_mutating(tool_name, tool_input, cwd=None):
     """Does this call change Bob's machine?"""
     if tool_name in MUTATING_TOOLS:
         return True
@@ -454,6 +520,11 @@ def is_mutating(tool_name, tool_input):
         for pattern in MUTATING_BASH:
             if re.search(pattern, cmd, re.IGNORECASE):
                 return True
+        # No inline shape matched. If the command runs a script, read it: the
+        # command line does not say what it does, but the file does.
+        verdict, _ = _script_writes(cmd, cwd)
+        if verdict:
+            return True
     return False
 
 

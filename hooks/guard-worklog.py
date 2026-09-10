@@ -136,7 +136,7 @@ def main():
     tool_input = payload.get("tool_input") or {}
 
     try:
-        if not lib_worklog.is_mutating(tool, tool_input):
+        if not lib_worklog.is_mutating(tool, tool_input, payload.get("cwd")):
             return 0                              # a read: never gated
         if _exempt(tool_input):
             return 0

@@ -110,18 +110,22 @@ deployed, and skips cleanly where nothing is installed.
 | rm-rf-variable | bash | `rm\s+-rf?\s+["']?\$` | warn | `rm -rf` on a variable that can be empty deletes the wrong tree. Expand it and read it back first. |
 | echo-e-escape | bash | `echo\s+-e\b` | warn | `echo -e` is not portable and mangles backslashes. Use printf or write the file. |
 
-### NOT YET WIRED. Writing style, on a surface no guard reads.
+### Writing style. WIRED, and proved to block.
 
-**Do not move these up yet.** They are valid rules on the `output` surface, and
-no guard reads that surface, so enabling one gives you a rule that looks live
-and never fires. Reading Claude's own prose needs a `Stop` hook with access to
-the message it just wrote, and the documented route to that is the transcript,
-which can lag the turn. That was left unbuilt rather than shipped unproven.
+`guard-output.py` runs on `Stop` and reads `last_assistant_message` straight
+from the payload, so Claude's own prose is checkable. This was written off as
+unbuildable on the assumption that it needed the transcript and the transcript
+lags; probing a real Stop hook took two minutes and showed otherwise.
 
-If you move one up anyway, the loader names it as IN FORCE BUT INERT every time
-it runs, so this cannot bite you silently. Check with:
+Measured 2026-09-10, both directions:
 
-    python ~/.claude/hooks/lib_agreement.py --list
+- **interactive**: a `deny` match sends the message back to be rewritten, and
+  the original never reaches Bob. Proved with a throwaway rule.
+- **headless** (`claude -p`): the same block is discarded and the text stands.
+
+So these rules are real where Bob works and decorative in scripted runs, the
+same asymmetry as `ask` on PreToolUse. The guard cannot block twice in one turn,
+so it can never spin a session.
 
 | slug | surface | pattern | action | why |
 |------|---------|---------|--------|-----|
