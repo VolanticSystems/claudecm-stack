@@ -6,6 +6,13 @@ private/
 __pycache__/
 *.pyc
 
+# Runtime output of the work-record hooks, produced by running the tests and by
+# the guards themselves. `state/` holds task files; `worklog/` holds the prompt
+# history and the audit trail. Both are machine state, neither is source, and
+# the history contains whatever Bob typed. This repo is public.
+hooks/state/
+hooks/worklog/
+
 # Model-panel review output. Verdicts land in the project the run was about,
 # and they are large, per-run, and reproducible from the bundle. Not source.
 .regents/
