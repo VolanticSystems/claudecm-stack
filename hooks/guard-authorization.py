@@ -58,7 +58,13 @@ Rule 1: decide whether he asked for work or words BEFORE doing either. A
 question gets an answer in prose and ZERO tool calls. If you genuinely believe
 work is needed, say what you would do and ask him to confirm it.
 
-Every tool call for this message is refused, not just this one. Answer him."""
+Every tool call for this message is refused, not just this one. Answer him.
+
+IF THIS IS WRONG, SAY SO. The classifier is tuned to stop on anything
+ambiguous, which is Bob's stated preference, so false stops are expected and
+are not evidence you did anything wrong. Tell him the guard misfired and on
+which phrasing; that is how the word lists get better. Do not quietly work
+around it."""
 
 NAME_IT_MESSAGE = """\
 STOP. He approved something, but nothing was named.

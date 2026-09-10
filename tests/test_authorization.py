@@ -104,6 +104,38 @@ for p in ["Go ahead", "go ahead", "yes", "ok", "sure", "yep", "Okay",
     check("name-it", p)
 
 print("")
+print("rule 1: indirect instructions (Bob rarely uses the imperative)")
+print("")
+
+# 2026-09-10: the guard refused to read a file he had just asked for, because
+# "I want you to read this" begins with neither an imperative nor a question.
+# The verb still decides, so an indirect lead-in governing a SPEECH verb is
+# still words.
+check("work",
+      "I want you to read this. It was from an instance that ran into rule one. "
+      "Confirm that this issue has either been addressed or if it remains to be "
+      "addressed, then what you plan to do to fix it.",
+      "THE SECOND BREAK: an explicit instruction, refused")
+for p in [
+    "I want you to read this.",
+    "I need you to fix the classifier.",
+    "I'd like you to run the tests.",
+    "you should commit that",
+    "let's build the agent guard",
+    "we need to fix issue two",
+    "go ahead and clean everything else up",
+    "I want you to review what it said.",
+]:
+    check("work", p)
+
+for p in [
+    "I want you to explain how this works.",
+    "I'd like you to tell me what happened.",
+    "let's talk about the agent design",
+]:
+    check("words", p, "indirect lead-in governing a SPEECH verb is still words")
+
+print("")
 print("rule 1: both in one message, answer first then work")
 print("")
 
@@ -195,6 +227,58 @@ turn("go ahead", prompt_id="p3")
 rc, out = call(prompt_id="p3")
 hcheck("a bare approval is refused for scope", decision(out) == "deny", out[:200])
 hcheck("and it asks him to name the work", "named" in out or "name" in out, out[:250])
+
+print("")
+print("rule 1: harness events are not messages from Bob")
+print("")
+
+NOTIF = ("<task-notification>\n<task-id>b9rhrih82</task-id>\n"
+         "<status>completed</status>\n<summary>Background command \"Run the "
+         "blindspot panel\" completed (exit code 0)</summary>\n"
+         "</task-notification>")
+NOTIF_FAILED = NOTIF.replace("completed (exit code 0)", "failed (exit code 1)")
+BANNER = "[SYSTEM NOTIFICATION - NOT USER INPUT]\nautomated event\n" + NOTIF
+
+# THE SABOTAGE, as the issue report specified: a notification must not read as
+# `words`, while a genuinely ambiguous human message still must. Remove the
+# envelope handling and the first assertion goes red while the second stays
+# green, so this cannot pass vacuously.
+hcheck("a task notification is not classified as a human message",
+       lib_authorization.classify(NOTIF)[0] == "machine",
+       lib_authorization.classify(NOTIF))
+hcheck("a FAILED notification takes the identical path",
+       lib_authorization.classify(NOTIF_FAILED)[0] == "machine")
+hcheck("the NOT USER INPUT banner is honoured",
+       lib_authorization.classify(BANNER)[0] == "machine")
+hcheck("SABOTAGE CONTROL: an ambiguous human message is still words",
+       lib_authorization.classify("the thing about the panel")[0] == "words")
+
+# Human text with a reminder stapled to it is still a human message, and is
+# classified on what Bob wrote rather than on the attachment.
+hcheck("a reminder attached to a real instruction does not hide it",
+       lib_authorization.classify(
+           "<system-reminder>be careful</system-reminder>\ncommit and push it"
+       )[0] == "work")
+
+shutil.rmtree(STATE, ignore_errors=True)
+
+turn("run the panel and write the report", session="n1", prompt_id="q1")
+run(CLASSIFY, {"prompt": NOTIF, "session_id": "n1", "prompt_id": "q2"})
+rc, out = call(session="n1", prompt_id="q2")
+hcheck("a notification after an AUTHORISED turn lets the job continue",
+       decision(out) is None, out[:200])
+
+turn("what did the panel find?", session="n2", prompt_id="r1")
+run(CLASSIFY, {"prompt": NOTIF, "session_id": "n2", "prompt_id": "r2"})
+rc, out = call(session="n2", prompt_id="r2")
+hcheck("a notification after a WORDS turn confers no new authorisation",
+       decision(out) == "deny", out[:200])
+
+shutil.rmtree(STATE, ignore_errors=True)
+run(CLASSIFY, {"prompt": NOTIF, "session_id": "n3", "prompt_id": "s1"})
+rc, out = call(session="n3", prompt_id="s1")
+hcheck("a notification with no prior verdict allows (writes nothing)",
+       decision(out) is None, out[:200])
 
 print("")
 print("rule 1: fail-open (must never be the reason work cannot start)")

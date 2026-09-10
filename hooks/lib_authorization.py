@@ -89,6 +89,45 @@ APPROVAL_WORDS = {
 MAX_BARE_APPROVAL_WORDS = 8
 
 
+# Envelopes the harness puts on its own events. These arrive on the same
+# channel a human message does, which is how a task-completion notification came
+# to be classified as if Bob had typed it.
+_ENVELOPES = (
+    r"(?is)<task-notification>.*?</task-notification>",
+    r"(?is)<system-reminder>.*?</system-reminder>",
+    r"(?is)<local-command-[a-z-]+>.*?</local-command-[a-z-]+>",
+    r"(?is)<command-(?:name|message|args)>.*?</command-(?:name|message|args)>",
+    r"(?is)<local-command-stdout>.*?</local-command-stdout>",
+)
+
+# The harness says this outright. Honouring it is the cheapest correct fix.
+_NOT_USER_INPUT = "[SYSTEM NOTIFICATION - NOT USER INPUT]"
+
+
+def strip_harness_envelopes(text):
+    """Return (human_text, was_machine_event).
+
+    A message may be pure machine event, pure human, or human text accompanied
+    by a reminder. Stripping first means the third case is classified on what
+    Bob actually wrote rather than on whatever the harness attached to it.
+    """
+    if not text:
+        return text, False
+    if _NOT_USER_INPUT in text:
+        return "", True
+    stripped = text
+    for pattern in _ENVELOPES:
+        stripped = re.sub(pattern, " ", stripped)
+    if not stripped.strip():
+        return "", True
+    return stripped, False
+
+
+def is_machine_event(text):
+    """True when the message carries no human words at all."""
+    return strip_harness_envelopes(text)[1]
+
+
 def _sentences(text):
     """Split into clauses, not just sentences.
 
@@ -123,6 +162,15 @@ def classify(prompt):
     """Return (verdict, reason). Verdict is 'work', 'words' or 'name-it'."""
     if prompt is None:
         return "words", "no prompt text was available"
+
+    # Classify what Bob wrote, not what the harness attached to it.
+    human, machine = strip_harness_envelopes(prompt)
+    if machine:
+        # Callers must handle this before asking for a verdict: a machine event
+        # neither grants nor withdraws authorisation. See classify-prompt.py.
+        return "machine", "harness event, not a message from Bob"
+    prompt = human
+
     text = prompt.strip()
     if not text:
         return "words", "empty message"
@@ -166,6 +214,48 @@ def classify(prompt):
     return "words", "no unambiguous instruction found"
 
 
+# Instructions Bob gives that are NOT imperatives. "I want you to read this" is
+# an order; "read this" is the same order in imperative form, and only the
+# second was recognised at first. Found on 2026-09-10 when the guard refused to
+# let a file be read that he had just asked for in those exact words.
+#
+# Each entry is matched, and whatever verb FOLLOWS it is looked up in
+# ACTION_VERBS. So the verb still decides: "I want you to explain" stays words
+# because `explain` is a speech verb, while "I want you to read this" is work.
+INDIRECT_LEADINS = (
+    r"i\s+want\s+you\s+to",
+    r"i\s+need\s+you\s+to",
+    r"i'?d\s+like\s+you\s+to",
+    r"i\s+would\s+like\s+you\s+to",
+    r"i\s+want\s+(?:you\s+)?to",
+    r"you\s+should",
+    r"you\s+need\s+to",
+    r"you\s+can",
+    r"let'?s",
+    r"we\s+should",
+    r"we\s+need\s+to",
+    r"go\s+ahead\s+and",
+    r"i\s+want",
+)
+
+
+def _indirect_instruction_verb(text):
+    """The verb governed by an indirect instruction lead-in, or None.
+
+    Returns the first verb after any lead-in so the caller can decide whether
+    it is an action or merely a request to speak.
+    """
+    low = text.lower()
+    for lead in INDIRECT_LEADINS:
+        for m in re.finditer(lead, low):
+            rest = _words(low[m.end():])
+            for w in rest:
+                if w in ("just", "please", "then", "also", "now", "go"):
+                    continue
+                return w
+    return None
+
+
 def _has_action_imperative(text):
     """True when some sentence is an instruction to ACT.
 
@@ -174,6 +264,12 @@ def _has_action_imperative(text):
     every question about doing something would read as permission to do it,
     which is the failure this whole module exists to stop.
     """
+    # Indirect forms first: "I want you to read this" is an instruction even
+    # though no clause begins with an imperative.
+    indirect = _indirect_instruction_verb(text)
+    if indirect in ACTION_VERBS:
+        return True
+
     for s in _sentences(text):
         w = _words(s)
         v = _leading_verb(s)

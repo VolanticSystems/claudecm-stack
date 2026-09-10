@@ -55,6 +55,39 @@ def main():
     except Exception as exc:
         verdict, reason = "work", "classifier failed (%s); allowing" % exc
 
+    # A HARNESS EVENT IS NOT A MESSAGE FROM BOB.
+    #
+    # Task-completion notifications arrive on this same channel, and the first
+    # version classified them as if he had typed them. They carry no imperative,
+    # so they fell through to "ambiguous stops" and refused the very tool call
+    # that would read the results of a job he had authorised. Reported from the
+    # blikje project on 2026-09-10: a ten-minute panel finished, its verdicts
+    # were on disk, and they could not be opened.
+    #
+    # The rule that produced it is right for a human message and wrong here. A
+    # notification is not an unrequested action; the task exists BECAUSE it was
+    # authorised, and the notification is the continuation of that.
+    #
+    # So an event neither grants nor withdraws authorisation. The previous
+    # verdict is carried forward under the new prompt_id, unchanged:
+    #   after a `work` turn   -> still work, the job continues
+    #   after a `words` turn  -> still words, an event cannot authorise anything
+    #   with no prior verdict -> nothing written, and the guard allows
+    # Success and failure notifications take the identical path, because a task
+    # that died needs handling at least as much as one that worked.
+    if verdict == "machine":
+        try:
+            prior_path = os.path.join(STATE_DIR, "turn-%s.json" % session)
+            with open(prior_path, encoding="utf-8") as fh:
+                prior = json.load(fh)
+        except Exception:
+            return 0                     # nothing to carry: the guard allows
+        verdict = prior.get("verdict")
+        if verdict not in ("work", "words", "name-it"):
+            return 0
+        reason = "carried forward past a harness event (%s)" % (
+            prior.get("reason") or "no reason recorded")
+
     state = {
         "verdict": verdict,
         "reason": reason,
