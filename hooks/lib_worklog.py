@@ -65,8 +65,25 @@ def task_file(session_id=None):
         return TASK_FILE
     safe = re.sub(r"[^A-Za-z0-9_-]", "-", str(session_id))[:64]
     return os.path.join(STATE_DIR, "task-%s.json" % safe)
-PROMPTS_FILE = os.path.join(STATE_DIR, "prompts.jsonl")
-LOG_FILE = os.path.join(STATE_DIR, "worklog.md")
+# TWO DIRECTORIES, BECAUSE THEY HOLD DIFFERENT KINDS OF THING.
+#
+# state/   is EPHEMERAL: task files, one per session. Deleting the lot is a
+#          legitimate way to unstick something and must cost nothing.
+# worklog/ is a RECORD: what Bob said, and every time he told me I went over
+#          the line. It is the only evidence of the thing this exists to show.
+#
+# They shared a directory until 2026-09-10, when clearing stuck state also wiped
+# the prompt history. Older authorisations then silently stopped being citable,
+# and the guard refused a commit because the message authorising it no longer
+# existed. Nothing in the layout had said one of them was precious.
+RECORDS_DIR = os.path.join(HERE, "worklog")
+PROMPTS_FILE = os.path.join(RECORDS_DIR, "prompts.jsonl")
+LOG_FILE = os.path.join(RECORDS_DIR, "worklog.md")
+
+# Where they used to live. Moved across on first use, so an existing machine
+# keeps its history rather than appearing to have none.
+_LEGACY_PROMPTS = os.path.join(STATE_DIR, "prompts.jsonl")
+_LEGACY_LOG = os.path.join(STATE_DIR, "worklog.md")
 
 # How many recent messages a citation may be drawn from. Generous, because a
 # task legitimately spans many turns of back-and-forth.
@@ -169,7 +186,49 @@ def _now():
 
 
 def _ensure_dir():
+    """Both directories, plus a one-time migration of the old shared layout.
+
+    Migration is best-effort and idempotent: if the new file already exists the
+    legacy one is left alone rather than merged, because appending an old
+    history onto a newer one would put entries out of order and the ordering is
+    what `recent_prompts` relies on.
+    """
     os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(RECORDS_DIR, exist_ok=True)
+    for legacy, current in ((_LEGACY_PROMPTS, PROMPTS_FILE),
+                            (_LEGACY_LOG, LOG_FILE)):
+        try:
+            if os.path.isfile(legacy) and not os.path.exists(current):
+                os.replace(legacy, current)
+        except Exception:
+            pass
+
+
+def _rotate(path, keep_bytes=2 * 1024 * 1024):
+    """Roll a record by month once it gets large.
+
+    The worklog is an append-only audit trail. Left alone it grows without
+    limit; rotated by month it stays readable and a corrupted tail costs one
+    month rather than everything.
+
+    IT IS STILL THE ONLY COPY. The nightly job backs up Documents\\GitHub, and
+    this lives under ~/.claude, which nothing backs up. Rotation limits the
+    damage from growth, not from loss.
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < keep_bytes:
+            return
+        stamp = _now().strftime("%Y-%m")
+        base, ext = os.path.splitext(path)
+        dest = "%s-%s%s" % (base, stamp, ext)
+        if os.path.exists(dest):
+            n = 2
+            while os.path.exists("%s-%s-%d%s" % (base, stamp, n, ext)):
+                n += 1
+            dest = "%s-%s-%d%s" % (base, stamp, n, ext)
+        os.replace(path, dest)
+    except Exception:
+        pass
 
 
 def normalise(text):
@@ -240,13 +299,30 @@ def citation_matches(citation):
 
     Substring match on normalised text. Deliberately not fuzzy: the point is
     that the words exist, and a paraphrase is not a citation.
+
+    A SHORT citation is accepted only when it is his ENTIRE message. "Yes, do
+    that" is real authorisation and is under the length floor, so requiring
+    twelve characters of substring would have made his most common approval
+    uncitable. Requiring it to be the whole message keeps it unambiguous:
+    he said that and nothing else, in reply to something named.
+
+    Found 2026-09-10, immediately after a task was opened citing words CLAUDE
+    had written rather than Bob.
     """
     c = normalise(citation)
-    if len(c) < 12:
-        return False, "a citation must be a real quote, not a few words"
+    if not c:
+        return False, "a citation cannot be empty"
     for entry in recent_prompts():
-        if c in normalise(entry.get("text")):
+        whole = normalise(entry.get("text"))
+        if not whole:
+            continue
+        if c == whole:
+            return True, "his whole message at %s" % _stamp(entry.get("at"))
+        if len(c) >= 12 and c in whole:
             return True, "matched a message from %s" % _stamp(entry.get("at"))
+    if len(c) < 12:
+        return False, ("a short citation must be his entire message; %r is not"
+                       % citation[:40])
     return False, "those words do not appear in anything Bob has said recently"
 
 
@@ -334,6 +410,7 @@ def is_mutating(tool_name, tool_input):
 def log(kind, what, citation="", extra=""):
     """One line per event, in a file Bob can read without tooling."""
     _ensure_dir()
+    _rotate(LOG_FILE)
     try:
         with io.open(LOG_FILE, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("- **%s** `%s` %s\n" % (
@@ -359,6 +436,7 @@ def record_stop(message, task):
     claimed is routinely thin, that shows up as a pattern instead of a feeling.
     """
     _ensure_dir()
+    _rotate(LOG_FILE)
     try:
         with io.open(LOG_FILE, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n")

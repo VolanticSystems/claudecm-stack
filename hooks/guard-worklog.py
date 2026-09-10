@@ -115,6 +115,41 @@ def main():
         return 0                                  # our bug is not his problem
 
     if task:
+        # THE CITATION IS CHECKED HERE, NOT ONLY WHEN THE TASK IS OPENED.
+        #
+        # The task file is an exempt path, so it can be written directly with
+        # the Write tool, which skips the library function that validates the
+        # citation. On 2026-09-10 a task was opened that way citing a sentence
+        # Claude had written rather than anything Bob said, and nothing caught
+        # it. Validating at USE closes that: an unfounded licence is worth
+        # nothing however it got onto disk.
+        try:
+            ok, why = lib_worklog.citation_matches(task.get("citation") or "")
+        except Exception:
+            return 0                              # cannot check: do not block
+        if ok:
+            return 0
+        reason = (
+            "STOP. A task is open, but its citation is not something Bob said.\n\n"
+            "  task:     %s\n"
+            "  citing:   %r\n"
+            "  problem:  %s\n\n"
+            "A licence you wrote for yourself is not a licence. Quote him, or\n"
+            "report what you found and ask."
+            % ((task.get("what") or "")[:120], (task.get("citation") or "")[:120], why))
+        try:
+            lib_worklog.log("REFUSED", "unfounded citation: %s"
+                            % (task.get("citation") or "")[:80])
+        except Exception:
+            pass
+        sys.stdout.write(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            },
+            "systemMessage": "work record: the open task cites nothing Bob said.",
+        }))
         return 0
 
     reason = REFUSAL.format(

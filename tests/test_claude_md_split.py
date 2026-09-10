@@ -119,12 +119,16 @@ missing = [label for label, needles in CHECKS
 check("all %d load-bearing concepts survive somewhere" % len(CHECKS),
       not missing, "missing: " + ", ".join(missing))
 
-# The documented guideline is under 200 lines, because the file loads in full
-# every session and a longer one measurably reduces adherence.
+# Anthropic's documented guideline is under 200 lines, because the file loads in
+# full every session and a longer one measurably reduces adherence. Bob raised
+# the ceiling to 250 on 2026-09-10 after adding `fixed-is-a-claim`, which is his
+# call: a rule that earns its place beats a round number from a doc. The check
+# stays because the point is to notice growth, not to hit a particular figure.
+MAX_LINES = 250
 lines = len(read("claude.md").splitlines())
 words = len(new.split())
-check("CLAUDE.md is under the documented 200-line guideline",
-      lines <= 200, "%d lines" % lines)
+check("CLAUDE.md is within the %d-line ceiling" % MAX_LINES,
+      lines <= MAX_LINES, "%d lines" % lines)
 check("and well under its pre-split size", words < 2500, "%d words" % words)
 
 # No file may carry a real corruption stub. Checked by the same signature the

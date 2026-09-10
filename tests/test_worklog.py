@@ -46,7 +46,9 @@ def check(name, cond, detail=""):
 
 def fresh():
     shutil.rmtree(lib_worklog.STATE_DIR, ignore_errors=True)
+    shutil.rmtree(lib_worklog.RECORDS_DIR, ignore_errors=True)
     os.makedirs(lib_worklog.STATE_DIR, exist_ok=True)
+    os.makedirs(lib_worklog.RECORDS_DIR, exist_ok=True)
 
 
 def said(text, prompt_id="p1"):
@@ -243,6 +245,54 @@ got, _ = call("Write", {"file_path": "C:/Users/Bob/thing.md", "content": "x"})
 check("and a state change is refused again", got == "deny", got)
 
 print("")
+print("work record: an unfounded citation is worthless however it got written")
+print("")
+
+# 2026-09-10. The task file is an exempt path, so it can be written directly
+# with the Write tool, which skips the library call that validates the citation.
+# A task was opened that way citing a sentence CLAUDE had written rather than
+# anything Bob said, and nothing caught it. The check now runs at USE.
+fresh()
+said("Go and finish the backup script.")
+io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
+    json.dumps({"what": "do whatever I like",
+                "citation": "Permission to rewrite the whole system",
+                "opened_at": time.time()}))
+got, out = call("Write", {"file_path": "C:/Users/Bob/thing.md", "content": "x"})
+check("a hand-written task with an invented citation is refused",
+      got == "deny", got)
+check("and the refusal quotes the bogus citation",
+      "Permission to rewrite" in out, out[:250])
+
+io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
+    json.dumps({"what": "finish the backup script",
+                "citation": "Go and finish the backup script",
+                "opened_at": time.time()}))
+got, _ = call("Write", {"file_path": "C:/Users/Bob/thing.md", "content": "x"})
+check("the same file with a real quote is honoured", got == "allow", got)
+
+print("")
+print("work record: a short approval is citable when it is the whole message")
+print("")
+
+# "Yes, do that" is real authorisation and is under the twelve-character floor,
+# so requiring a substring match would have made his most common approval
+# uncitable. It counts only as an entire message, which keeps it unambiguous.
+fresh()
+said("Yes, do that.")
+ok, why = lib_worklog.citation_matches("Yes, do that.")
+check("his whole short message is a valid citation", ok, why)
+check("and says so", "whole message" in why, why)
+
+ok, why = lib_worklog.citation_matches("yes")
+check("but a fragment of it is not", not ok, why)
+
+fresh()
+said("Go ahead and rebuild the installer, then run the suite.")
+ok, why = lib_worklog.citation_matches("rebuild the installer")
+check("a long-enough substring of a long message still works", ok, why)
+
+print("")
 print("work record: a task belongs to ONE session")
 print("")
 
@@ -283,6 +333,79 @@ check("another session may NOT", call_as("beta", "Write", w) == "deny")
 lib_worklog.close_task("done", "alpha")
 check("closing it clears only that session's task",
       lib_worklog.current_task("alpha") is None)
+
+print("")
+print("work record: CLEARING STATE MUST NOT DESTROY THE RECORD")
+print("")
+
+# 2026-09-10. Records and ephemeral state shared a directory, so clearing stuck
+# task files also wiped the prompt history. Older authorisations then silently
+# stopped being citable, and the guard refused a commit because the message that
+# authorised it no longer existed. Nothing had said one of them was precious.
+fresh()
+said("Go and rebuild the installer for me please.")
+lib_worklog.open_task("rebuild the installer",
+                      "Go and rebuild the installer", session_id="s1")
+lib_worklog.log("SOMETHING", "an entry that must survive")
+
+check("records and state are different directories",
+      os.path.dirname(lib_worklog.PROMPTS_FILE)
+      != os.path.dirname(lib_worklog.TASK_FILE))
+
+# The exact move that caused the incident.
+shutil.rmtree(lib_worklog.STATE_DIR, ignore_errors=True)
+
+check("the task is gone, which is the point of clearing state",
+      lib_worklog.current_task("s1") is None)
+check("the prompt history SURVIVES", len(lib_worklog.recent_prompts()) >= 1,
+      str(lib_worklog.recent_prompts()))
+ok, why = lib_worklog.citation_matches("Go and rebuild the installer")
+check("so an old authorisation is still citable", ok, why)
+check("and the audit trail survives",
+      "an entry that must survive" in io.open(
+          lib_worklog.LOG_FILE, encoding="utf-8").read())
+
+print("")
+print("work record: the old layout migrates rather than being lost")
+print("")
+
+fresh()
+shutil.rmtree(lib_worklog.RECORDS_DIR, ignore_errors=True)
+os.makedirs(lib_worklog.STATE_DIR, exist_ok=True)
+legacy = os.path.join(lib_worklog.STATE_DIR, "prompts.jsonl")
+io.open(legacy, "w", encoding="utf-8", newline="\n").write(
+    json.dumps({"at": time.time(), "session": "old", "prompt_id": "old",
+                "text": "Fix the thing I asked about earlier."}) + "\n")
+io.open(os.path.join(lib_worklog.STATE_DIR, "worklog.md"), "w",
+        encoding="utf-8", newline="\n").write("- an old audit line\n")
+
+lib_worklog.record_prompt("a new message", "s2", "p2")
+
+check("the legacy prompt history is carried across",
+      any("Fix the thing I asked about earlier" in (e.get("text") or "")
+          for e in lib_worklog.recent_prompts()),
+      str(lib_worklog.recent_prompts()))
+check("an old authorisation still works after the move",
+      lib_worklog.citation_matches("Fix the thing I asked about earlier")[0])
+check("the legacy audit trail is carried across too",
+      "an old audit line" in io.open(lib_worklog.LOG_FILE,
+                                     encoding="utf-8").read())
+check("and the legacy file is gone, not duplicated", not os.path.isfile(legacy))
+
+print("")
+print("work record: the audit trail rotates instead of growing forever")
+print("")
+
+fresh()
+io.open(lib_worklog.LOG_FILE, "w", encoding="utf-8", newline="\n").write(
+    "x" * (3 * 1024 * 1024))
+lib_worklog.log("AFTER", "written after the roll")
+body = io.open(lib_worklog.LOG_FILE, encoding="utf-8").read()
+check("a large log is rolled, not appended to", len(body) < 1024, len(body))
+check("and the new entry lands in the fresh file", "written after the roll" in body)
+rolled = [f for f in os.listdir(lib_worklog.RECORDS_DIR)
+          if f.startswith("worklog-") and f.endswith(".md")]
+check("the old content is kept under a dated name", len(rolled) == 1, str(rolled))
 
 print("")
 print("work record: fail-open")
