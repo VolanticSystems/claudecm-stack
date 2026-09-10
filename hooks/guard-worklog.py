@@ -109,7 +109,8 @@ def main():
             return 0                              # a read: never gated
         if _exempt(tool_input):
             return 0
-        task = lib_worklog.current_task()
+        # Keyed by session: another instance's licence is not this one's.
+        task = lib_worklog.current_task(payload.get("session_id"))
     except Exception:
         return 0                                  # our bug is not his problem
 

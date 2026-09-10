@@ -243,6 +243,48 @@ got, _ = call("Write", {"file_path": "C:/Users/Bob/thing.md", "content": "x"})
 check("and a state change is refused again", got == "deny", got)
 
 print("")
+print("work record: a task belongs to ONE session")
+print("")
+
+# Found 2026-09-10 while investigating a hook collision in another project. The
+# first version kept a single global task file, so three instances in three
+# projects shared one licence: A opened a task and B inherited it, which is the
+# exact opposite of what this is for.
+fresh()
+said("Go and build the output guard for me.")
+lib_worklog.open_task("build the output guard",
+                      "Go and build the output guard", session_id="alpha")
+
+check("the session that opened it has a task",
+      lib_worklog.current_task("alpha") is not None)
+check("a DIFFERENT session does not inherit it",
+      lib_worklog.current_task("beta") is None)
+
+
+def call_as(session, tool, tool_input):
+    p = subprocess.run([sys.executable, GUARD],
+                       input=json.dumps({"tool_name": tool,
+                                         "tool_input": tool_input,
+                                         "session_id": session}),
+                       capture_output=True, text=True)
+    if not p.stdout.strip():
+        return "allow"
+    try:
+        return json.loads(p.stdout).get(
+            "hookSpecificOutput", {}).get("permissionDecision", "allow")
+    except Exception:
+        return "unparseable"
+
+
+w = {"file_path": "C:/Users/Bob/thing.md", "content": "x"}
+check("the owning session may change state", call_as("alpha", "Write", w) == "allow")
+check("another session may NOT", call_as("beta", "Write", w) == "deny")
+
+lib_worklog.close_task("done", "alpha")
+check("closing it clears only that session's task",
+      lib_worklog.current_task("alpha") is None)
+
+print("")
 print("work record: fail-open")
 print("")
 

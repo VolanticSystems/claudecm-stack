@@ -57,6 +57,20 @@ def main():
         if isinstance(value, str) and value:
             checks.append((value, "path"))
 
+    # Subagent launches get two extra surfaces, and they are the only ones a
+    # NEGATED rule may sit on. That is what makes delegation governable without
+    # banning it: a launch can be refused unless its prompt asks for something
+    # checkable, rather than the Agent tool being forbidden outright.
+    #
+    # The ban that used to be here was bad design. Bob: "Sometimes I will use
+    # Fable or Opus and say I want you to do what you can with Sonnet. This
+    # prevents that." Handing grunt work to a cheaper model is a thing he wants,
+    # and the risk was never that an agent ran, it was what it was asked for and
+    # what came back.
+    if tool == "Agent":
+        checks.append((tool_input.get("subagent_type") or "", "agent_type"))
+        checks.append((tool_input.get("prompt") or "", "agent_prompt"))
+
     hits = []
     problems = []
     for text, surface in checks:

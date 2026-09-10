@@ -58,11 +58,11 @@ def main():
     lib_worklog.record_prompt(human, session, prompt_id)
 
     if lib_worklog.looks_like_stop(human):
-        lib_worklog.record_stop(human, lib_worklog.current_task())
+        lib_worklog.record_stop(human, lib_worklog.current_task(session))
         # Whatever was running is no longer sanctioned. Closing it means the
         # next state change needs a fresh citation rather than coasting on the
         # licence he just objected to.
-        lib_worklog.close_task("Bob said stop")
+        lib_worklog.close_task("Bob said stop", session)
 
     return 0
 

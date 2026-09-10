@@ -41,7 +41,19 @@ VALID_ACTIONS = ("deny", "ask", "warn")
 # path   WHERE a write is going (the target path, not its content)
 # tool   the tool's own name, for tools that must never be used at all
 # output the assistant's prose
-VALID_SURFACES = ("bash", "write", "path", "tool", "output")
+# bash        the shell command text
+# write       the CONTENT being written to a file
+# path        WHERE a write is going (the target path, not its content)
+# tool        the tool's own name, for tools that must never be used at all
+# output      the assistant's prose
+# agent_type  a subagent's type, e.g. Explore (read-only) or general-purpose
+# agent_prompt what a subagent is being ASKED, checked before it starts
+#
+# The last two exist only for Agent launches, which is what makes a NEGATED
+# rule safe on them: a rule that fires when a required phrase is MISSING would
+# otherwise match every unrelated tool call in the session.
+VALID_SURFACES = ("bash", "write", "path", "tool", "output",
+                  "agent_type", "agent_prompt")
 
 # Surfaces that no installed guard reads yet. A rule on one of these is VALID
 # but INERT: it would sit above the marker looking enforced and never fire.
@@ -95,15 +107,25 @@ DEFAULT_AGREEMENT = os.path.join(HERE, "agreement.md")  # kept for reference
 
 
 class Rule(object):
-    __slots__ = ("slug", "surfaces", "pattern", "regex", "action", "why")
+    __slots__ = ("slug", "surfaces", "pattern", "regex", "action", "why",
+                 "negated")
 
-    def __init__(self, slug, surfaces, pattern, regex, action, why):
+    def __init__(self, slug, surfaces, pattern, regex, action, why,
+                 negated=False):
         self.slug = slug
         self.surfaces = surfaces
         self.pattern = pattern
         self.regex = regex
         self.action = action
         self.why = why
+        # A negated rule fires when the pattern is ABSENT. Written `!pattern`.
+        #
+        # This is what lets a rule REQUIRE something rather than only forbid it,
+        # which is the whole reason subagents are governable at all: a launch
+        # can be refused unless its prompt asks for evidence that can be
+        # checked afterwards. Only ever put a negated rule on a surface that
+        # exists for one kind of call, or it fires on everything else.
+        self.negated = negated
 
     def __repr__(self):
         return "<Rule %s %s %s>" % (self.slug, "/".join(self.surfaces), self.action)
@@ -235,6 +257,21 @@ def load(path=None):
         if len(pattern) > 1 and pattern.startswith("`") and pattern.endswith("`"):
             pattern = pattern[1:-1]
 
+        # `!pattern` means "fire when this is MISSING". Refused outside the
+        # agent surfaces, because those are the only ones evaluated for a
+        # single kind of call; anywhere else a negated rule would fire on every
+        # unrelated tool in the session.
+        negated = False
+        if pattern.startswith("!"):
+            negated = True
+            pattern = pattern[1:]
+            if any(s not in ("agent_type", "agent_prompt") for s in surfaces):
+                problems.append(
+                    "line %d (%s): a negated pattern is only allowed on "
+                    "agent_type or agent_prompt, not %s"
+                    % (lineno, slug, ", ".join(surfaces)))
+                continue
+
         try:
             regex = re.compile(pattern, re.IGNORECASE)
         except Exception as exc:
@@ -259,7 +296,7 @@ def load(path=None):
                 "rule is IN FORCE BUT INERT and will never fire"
                 % (lineno, slug, ", ".join(inert)))
 
-        rules.append(Rule(slug, surfaces, pattern, regex, action, why))
+        rules.append(Rule(slug, surfaces, pattern, regex, action, why, negated))
 
     return rules, problems
 
@@ -272,17 +309,22 @@ def evaluate(text, surface, path=None):
     """
     rules, problems = load(path)
     hits = []
-    if not text:
+    # A negated rule must still fire on empty text: an Agent launched with no
+    # prompt at all has certainly not asked for evidence.
+    if not text and not any(r.negated and surface in r.surfaces for r in rules):
         return hits, problems
     for rule in rules:
         if surface not in rule.surfaces:
             continue
         try:
-            m = rule.regex.search(text)
+            m = rule.regex.search(text or "")
         except Exception as exc:
             problems.append("rule %s failed while matching (%s)" % (rule.slug, exc))
             continue
-        if m:
+        if rule.negated:
+            if not m:
+                hits.append((rule, "<required text is missing>"))
+        elif m:
             hits.append((rule, m.group(0)))
     return hits, problems
 
