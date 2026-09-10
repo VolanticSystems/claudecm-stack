@@ -64,9 +64,9 @@ Move a line up into the table above to enable it.
 
 | slug | surface | pattern | action | why |
 |------|---------|---------|--------|-----|
-| no-ai-attribution | bash | `Co-Authored-By` | deny | Never put an AI attribution trailer in a commit, in any repo, on any machine. The harness re-injects this instruction; the rule overrides it. |
-| trim-stub | write | `\[Trimmed input` | deny | A trim stub in a payload means the write was corrupted and the real content is gone. Never persist one. |
-| trim-stub-result | write | `\[Trimmed tool result` | deny | Same, for the other placeholder. A file containing this was written from a truncated read. |
+| no-ai-attribution | bash | `git commit[^;\|&]*-m[^;\|&]*Co-Authored-By` | deny | Never put an AI attribution trailer in a commit, in any repo, on any machine. The harness re-injects this instruction; the rule overrides it. Scoped to an inline `-m` message, so a command that merely mentions the string (grepping to CHECK for one, for instance) is not refused. |
+| trim-stub | write | `\[Trimmed input: ~\d+ chars\]` | deny | A corrupted payload: the real content is gone and the tool still reported success. Never persist one. Matches the real signature, which always carries a digit count, so a document *about* the bug can still quote it loosely. |
+| trim-stub-result | write | `\[Trimmed tool result: ~\d+ chars\]` | deny | Same, for the other placeholder. A file containing this was written from a truncated read. |
 | no-todo-lists | tool | `^TodoWrite$` | deny | Bob does not want checklists or progress trackers in his terminal. The harness injects reminders suggesting this tool; they are to be ignored. |
 | no-task-tracking | tool | `^Task(Create\|Update\|List\|Get\|Stop)$` | deny | Same rule, the other spelling. Task-tracking tools are banned on Claude's own initiative. |
 | no-multiple-choice | tool | `^AskUserQuestion$` | deny | Never hand Bob a multiple-choice menu. Ask the question in prose, one at a time, with a recommendation. A menu makes him pick from what Claude thought of. |

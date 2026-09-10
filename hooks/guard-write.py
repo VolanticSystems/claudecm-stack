@@ -32,6 +32,31 @@ except Exception:
 SURFACE = "write"
 WATCHED = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
+# BOOTSTRAP EXEMPTION. The agreement file is not subject to its own rules.
+#
+# Found the hard way on 2026-09-10, the first hour the guards were live. A rule
+# row necessarily CONTAINS the pattern it matches, so writing that row trips the
+# rule and the agreement becomes uneditable by the only means available. A bad
+# pattern could then never be corrected: you would be locked out of the file
+# that locks you out. Same reason a linter does not lint its own config.
+#
+# Narrow on purpose: the exemption is one exact path, it applies only to this
+# content check, and every skip is announced rather than silent.
+
+
+def _is_agreement(path):
+    try:
+        target = os.path.realpath(os.path.abspath(path))
+        known = os.path.realpath(os.path.abspath(lib_agreement.default_agreement_path()))
+        if target == known:
+            return True
+        # Also the repo copy, wherever this script was installed from.
+        beside = os.path.realpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "agreement.md"))
+        return target == beside
+    except Exception:
+        return False
+
 # Every field across the write-shaped tools that carries content the model
 # authored. Read rather than assumed, because the names differ per tool and
 # have changed between versions.
@@ -49,6 +74,14 @@ def main():
         return 0
 
     tool_input = payload.get("tool_input") or {}
+
+    target_path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+    if target_path and _is_agreement(target_path):
+        _emit_note("work agreement: content checks skipped for the agreement file "
+                   "itself (a rule row contains the pattern it matches, so the file "
+                   "would otherwise be uneditable). Path: %s" % target_path)
+        return 0
+
     chunks = []
     for field in CONTENT_FIELDS:
         value = tool_input.get(field)
