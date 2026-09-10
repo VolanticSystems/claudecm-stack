@@ -51,9 +51,9 @@ def fresh():
     os.makedirs(lib_worklog.RECORDS_DIR, exist_ok=True)
 
 
-def said(text, prompt_id="p1"):
+def said(text, prompt_id="p1", session="t"):
     subprocess.run([sys.executable, RECORD],
-                   input=json.dumps({"prompt": text, "session_id": "t",
+                   input=json.dumps({"prompt": text, "session_id": session,
                                      "prompt_id": prompt_id}),
                    capture_output=True, text=True)
 
@@ -301,7 +301,7 @@ print("")
 # projects shared one licence: A opened a task and B inherited it, which is the
 # exact opposite of what this is for.
 fresh()
-said("Go and build the output guard for me.")
+said("Go and build the output guard for me.", session="alpha")
 lib_worklog.open_task("build the output guard",
                       "Go and build the output guard", session_id="alpha")
 
@@ -406,6 +406,75 @@ check("and the new entry lands in the fresh file", "written after the roll" in b
 rolled = [f for f in os.listdir(lib_worklog.RECORDS_DIR)
           if f.startswith("worklog-") and f.endswith(".md")]
 check("the old content is kept under a dated name", len(rolled) == 1, str(rolled))
+
+print("")
+print("work record: THE WEDGE. One session must not evict another's licence")
+print("")
+
+# 2026-09-10, the worst defect in this design. All sessions appended to one
+# 60-entry prompt file, so a busy session pushed every other session's history
+# out. A blikje session running overnight under an explicit multi-hour
+# authorization from Bob was wedged: its genuine licence had been evicted by a
+# different session's traffic, so its real citation read as invented, and the
+# task could not be withdrawn either because the remedy was inside the gate.
+fresh()
+
+LICENCE = ("work through the repair plan. Spin off sonnet agents if it looks "
+           "like it's something they can handle. I'll leave it to you.")
+said(LICENCE, prompt_id="overnight")            # session "t", the long one
+
+# Another session now talks a great deal.
+for i in range(120):
+    subprocess.run([sys.executable, RECORD],
+                   input=json.dumps({"prompt": "chatter number %d about "
+                                               "something else entirely" % i,
+                                     "session_id": "noisy",
+                                     "prompt_id": "n%d" % i}),
+                   capture_output=True, text=True)
+
+ok, why = lib_worklog.citation_matches(LICENCE, "t")
+check("the overnight licence SURVIVES another session's traffic", ok, why)
+check("and the noisy session cannot cite it",
+      not lib_worklog.citation_matches(LICENCE, "noisy")[0])
+
+print("")
+print("work record: the remedy is never inside the gate")
+print("")
+
+# Their Call 2 and Call 4: writing the task file from Bash, and deleting it,
+# were both refused as "a change" while no task was open, which is the exact
+# state the refusal message tells you to leave.
+fresh()
+state = lib_worklog.STATE_DIR.replace("\\", "/")
+for label, cmd in [
+    ("writing the task file from Bash",
+     'cat > "%s/current-task.json" <<JSON\n{}\nJSON' % state),
+    ("deleting the task file", 'rm -f "%s/current-task.json"' % state),
+    ("clearing the whole state dir", 'rm -rf "%s"' % state),
+]:
+    got, _ = call("Bash", {"command": cmd})
+    check("with NO task open: %s" % label, got == "allow", got)
+
+got, out = call("Write", {"file_path": lib_worklog.TASK_FILE, "content": "{}"})
+check("and the Write tool agrees (the gate is consistent)", got == "allow", got)
+
+print("")
+print("work record: a refusal always says how to get out")
+print("")
+
+fresh()
+said("Go and do the thing I asked about.")
+io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
+    json.dumps({"what": "something", "citation": "words he never said at all",
+                "opened_at": time.time()}))
+got, out = call("Write", {"file_path": "C:/Users/Bob/thing.md", "content": "x"})
+check("an unmatched citation still refuses", got == "deny", got)
+check("but the refusal names the file to delete",
+      "current-task.json" in out, out[:400])
+check("and says the state directory is exempt",
+      "exempt" in out.lower(), out[:400])
+check("and does not assume the licence was invented",
+      "record is short" in out.lower() or "repeat it" in out.lower(), out[:500])
 
 print("")
 print("work record: fail-open")

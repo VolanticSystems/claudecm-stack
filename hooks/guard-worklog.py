@@ -62,6 +62,9 @@ If he asked for this, open a task first by writing:
 
 The citation is checked against what he actually said. If you cannot quote him,
 that is the answer: you were not asked. Report what you found and stop.
+
+To WITHDRAW a task, delete that file. Writing or deleting anything in that
+directory is exempt from this guard, from any tool, so you are never stuck.
 {extra}"""
 
 
@@ -77,7 +80,21 @@ def _target(tool_input):
 
 
 def _exempt(tool_input):
-    """Writing the record itself, or scratch inside the project's temp."""
+    """Writing the record itself, or scratch inside the project's temp.
+
+    THE REMEDY MUST NOT BE INSIDE THE GATE. The refusal below tells the reader
+    to write the task file, and until 2026-09-10 doing that from Bash was
+    refused as "a change" while no task was open, which is the exact state the
+    message is instructing you to leave. The Write tool succeeded on the same
+    path, so the gate was inconsistent between tools and the one carrying the
+    instructions was the one that would not carry it out. A blikje session was
+    wedged by precisely that.
+
+    So the state directory is exempt however it is reached: by path field, or
+    by a shell command that names it.
+    """
+    state = os.path.realpath(lib_worklog.STATE_DIR).replace("\\", "/").lower()
+
     for key in ("file_path", "notebook_path", "path"):
         v = (tool_input or {}).get(key)
         if not isinstance(v, str) or not v:
@@ -86,11 +103,25 @@ def _exempt(tool_input):
             p = os.path.realpath(os.path.abspath(v)).replace("\\", "/").lower()
         except Exception:
             continue
-        state = os.path.realpath(lib_worklog.STATE_DIR).replace("\\", "/").lower()
         if p.startswith(state):
             return True
         if "/temp/" in p or p.endswith("/temp"):
             return True
+
+    # A shell command touching the state directory: opening, closing or
+    # clearing a task. Matched on the directory name so the spelling of the
+    # path separator and the quoting do not matter.
+    cmd = (tool_input or {}).get("command")
+    if isinstance(cmd, str) and cmd:
+        c = cmd.replace("\\", "/").lower()
+        # Matched against the CONFIGURED state directory, not a hardcoded
+        # ~/.claude path: the first version hardcoded it and so exempted
+        # nothing when the directory was somewhere else, which is exactly the
+        # kind of thing that only shows up on someone else's machine.
+        for needle in (state, os.path.basename(state) + "/current-task.json",
+                       "current-task.json", "task-"):
+            if needle and needle in c:
+                return True
     return False
 
 
@@ -124,19 +155,29 @@ def main():
         # it. Validating at USE closes that: an unfounded licence is worth
         # nothing however it got onto disk.
         try:
-            ok, why = lib_worklog.citation_matches(task.get("citation") or "")
+            ok, why = lib_worklog.citation_matches(
+                task.get("citation") or "", payload.get("session_id"))
         except Exception:
             return 0                              # cannot check: do not block
         if ok:
             return 0
         reason = (
-            "STOP. A task is open, but its citation is not something Bob said.\n\n"
+            "STOP. A task is open, but its citation cannot be matched.\n\n"
             "  task:     %s\n"
             "  citing:   %r\n"
             "  problem:  %s\n\n"
-            "A licence you wrote for yourself is not a licence. Quote him, or\n"
-            "report what you found and ask."
-            % ((task.get("what") or "")[:120], (task.get("citation") or "")[:120], why))
+            "Usually that means the licence was written rather than quoted, and\n"
+            "a licence you wrote for yourself is not a licence.\n\n"
+            "BUT IT CAN ALSO MEAN THE RECORD IS SHORT, NOT THAT YOU INVENTED IT.\n"
+            "The history only holds what this session has said since the guards\n"
+            "were installed. If Bob really did say this, say so plainly and ask\n"
+            "him to repeat it; do not pretend you were not asked.\n\n"
+            "To withdraw this task, delete:\n"
+            "  %s\n"
+            "Writing or deleting anything in that directory is exempt from this\n"
+            "guard, from any tool, so you are never stuck."
+            % ((task.get("what") or "")[:120], (task.get("citation") or "")[:120],
+               why, lib_worklog.TASK_FILE))
         try:
             lib_worklog.log("REFUSED", "unfounded citation: %s"
                             % (task.get("citation") or "")[:80])

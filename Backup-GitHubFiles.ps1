@@ -58,6 +58,35 @@ $EXCLUDE_DIRS = @(
 # Per-project extras. Keyed by project folder name.
 $EXCLUDE_PER_PROJECT = @{
     'youtube-processor' = @('library')   # 4.8 GB of MP4s, re-downloadable
+    'dot-claude-config' = @('file-history', 'plugins', 'cache', 'telemetry',
+                            'shell-snapshots', 'statsig', 'uploads', 'todos',
+                            'downloads', 'ide', 'local',
+                            # Sidecar directories beside each transcript, and
+                            # the same class of thing: subagent transcripts and
+                            # captured tool output, 1.2 GB of it. Excluding the
+                            # main transcripts while keeping these kept 630 MB
+                            # of conversation debris in a config backup.
+                            'subagents', 'tool-results')
+}
+
+# File patterns dropped from a project's zip, keyed the same way. Directory
+# names are not enough here: the transcripts under .claude\projects are the bulk
+# of it, but they sit alongside the auto-memory files, which are precious and
+# must be kept. So the exclusion has to be by extension, not by folder.
+$EXCLUDE_FILES_PER_PROJECT = @{
+    # Transcripts are named for their session GUID, so the pattern matches that
+    # shape rather than every .jsonl. A bare `*.jsonl` also swallowed
+    # hooks\worklog\prompts.jsonl, which is the record of what Bob has said and
+    # therefore the thing that lets an older authorisation still be verified.
+    # Losing it is what broke a commit earlier the same day.
+    #
+    # ~1.6 GB of transcripts, already covered twice over by
+    # claude-conversation-backup and by CMV's auto-backups. The memory\*.md
+    # files sitting beside them are NOT excluded, and are the point of this.
+    'dot-claude-config' = @(
+        '????????-????-????-????-????????????.jsonl',
+        '*.cmv-trim-tmp'     # half-written trimmer leftovers, pure junk
+    )
 }
 
 $SEVENZIP = @(
@@ -118,8 +147,30 @@ function Get-NewestWrite {
     return $newest
 }
 
-$projects = Get-ChildItem $Source -Directory -ErrorAction SilentlyContinue
-if ($Only) { $projects = $projects | Where-Object { $Only -contains $_.Name } }
+# Sources carry an explicit LABEL rather than being keyed by directory name.
+# `Documents\GitHub\.claude` already exists as a project, so keying on the name
+# put two different directories under the same key: the per-project excludes
+# went to the wrong one and the two fought over one zip. Found 2026-09-10 by
+# instrumenting the enumeration after the zip came out at 0.4 KB.
+$projects = @(Get-ChildItem $Source -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { [pscustomobject]@{ Name = $_.Name; FullName = $_.FullName } })
+
+# ~/.claude is not a project, and until 2026-09-10 nothing backed it up at all.
+# It holds CLAUDE.md, casebook.md, agreement.md, the guard scripts, the work
+# record (every time Bob said I went over the line) and the auto-memory for
+# every project. All single copies on C:, none of it in any git repo.
+#
+# Its 1.8 GB is mostly things that do not belong in a nightly zip. The
+# transcripts under projects\ are ~1.6 GB and are already covered twice, by
+# claude-conversation-backup and by CMV's own auto-backups; file-history,
+# plugins, cache, telemetry and shell-snapshots are another ~250 MB of
+# regenerable or disposable state. What remains is the part that cannot be
+# reconstructed, and it is small.
+$claudeDir = Join-Path $env:USERPROFILE '.claude'
+if (Test-Path $claudeDir) {
+    $projects += [pscustomobject]@{ Name = 'dot-claude-config'; FullName = $claudeDir }
+}
+if ($Only) { $projects = @($projects | Where-Object { $Only -contains $_.Name }) }
 
 $zipped = 0; $skipped = 0; $failed = 0; $bytes = 0L
 foreach ($p in $projects) {
@@ -128,7 +179,8 @@ foreach ($p in $projects) {
         $excludes += $EXCLUDE_PER_PROJECT[$p.Name]
     }
 
-    $zipPath = Join-Path $Dest ($p.Name + '.zip')
+    $zipName = $p.Name
+    $zipPath = Join-Path $Dest ($zipName + '.zip')
     $newest = Get-NewestWrite -Path $p.FullName -Excludes $excludes
 
     if ($newest -eq [datetime]::MinValue) {
@@ -149,11 +201,14 @@ foreach ($p in $projects) {
 
     # Build to a temp name and move into place, so an interrupted run cannot
     # leave a half-written zip standing where a good one used to be.
-    $tmp = Join-Path $Dest ($p.Name + '.zip.partial')
+    $tmp = Join-Path $Dest ($zipName + '.zip.partial')
     if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
 
     $args = @('a', '-tzip', '-mx1', '-bso0', '-bsp0', '-y', $tmp, (Join-Path $p.FullName '*'))
     foreach ($x in $excludes) { $args += "-xr!$x" }
+    if ($EXCLUDE_FILES_PER_PROJECT.ContainsKey($p.Name)) {
+        foreach ($x in $EXCLUDE_FILES_PER_PROJECT[$p.Name]) { $args += "-xr!$x" }
+    }
 
     $started = Get-Date
     & $SEVENZIP @args 2>&1 | Out-Null

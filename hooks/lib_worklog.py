@@ -85,9 +85,19 @@ LOG_FILE = os.path.join(RECORDS_DIR, "worklog.md")
 _LEGACY_PROMPTS = os.path.join(STATE_DIR, "prompts.jsonl")
 _LEGACY_LOG = os.path.join(STATE_DIR, "worklog.md")
 
-# How many recent messages a citation may be drawn from. Generous, because a
-# task legitimately spans many turns of back-and-forth.
-PROMPT_HISTORY = 60
+# How many of a session's own messages a citation may be drawn from.
+#
+# THIS USED TO BE A SINGLE SHARED FILE, AND THAT WAS THE WORST BUG IN HERE.
+# Every session appended to one 60-entry list, so a busy session evicted every
+# other session's history. On 2026-09-10 a blikje session running overnight
+# under an explicit multi-hour authorization from Bob was wedged: its licence
+# had been pushed out of the file by a different session's traffic, so its
+# genuine citation read as invented, and the task could not even be withdrawn.
+#
+# Per session now, so no session can starve another, and retained by AGE as
+# well as count: a long task's authorization must outlive the chatter after it.
+PROMPT_HISTORY = 400
+PROMPT_MAX_AGE_DAYS = 30
 
 # A task older than this is assumed abandoned rather than open. Long, because
 # real work spans hours; the point is to expire a forgotten task, not to time
@@ -248,6 +258,14 @@ def normalise(text):
 
 # ------------------------------------------------------------------ prompts
 
+def prompts_file(session_id=None):
+    """One history per session. See PROMPT_HISTORY for why."""
+    if not session_id:
+        return PROMPTS_FILE
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", str(session_id))[:64]
+    return os.path.join(RECORDS_DIR, "prompts-%s.jsonl" % safe)
+
+
 def record_prompt(text, session_id, prompt_id):
     """Append one of Bob's messages, so a citation can be checked against it."""
     _ensure_dir()
@@ -257,44 +275,78 @@ def record_prompt(text, session_id, prompt_id):
         "prompt_id": prompt_id,
         "text": (text or "")[:4000],
     }
+    path = prompts_file(session_id)
     try:
-        with io.open(PROMPTS_FILE, "a", encoding="utf-8", newline="\n") as fh:
+        with io.open(path, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(entry) + "\n")
     except Exception:
         return
-    _trim_prompts()
+    _trim_prompts(path)
 
 
-def _trim_prompts():
+def _trim_prompts(path):
+    """Drop by age first, then by count.
+
+    Age matters more than count here: an overnight authorization has to still
+    be citable after a day of chatter, and it is the OLD entries that carry the
+    licence while the new ones are usually acknowledgements.
+    """
     try:
-        with io.open(PROMPTS_FILE, encoding="utf-8") as fh:
+        with io.open(path, encoding="utf-8") as fh:
             lines = fh.readlines()
         if len(lines) <= PROMPT_HISTORY * 2:
             return
-        with io.open(PROMPTS_FILE, "w", encoding="utf-8", newline="\n") as fh:
-            fh.writelines(lines[-PROMPT_HISTORY:])
+        cutoff = _now().timestamp() - PROMPT_MAX_AGE_DAYS * 86400
+        kept = []
+        for line in lines:
+            try:
+                if float(json.loads(line).get("at") or 0) >= cutoff:
+                    kept.append(line)
+            except Exception:
+                continue
+        with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.writelines(kept[-PROMPT_HISTORY:])
     except Exception:
         pass
 
 
-def recent_prompts(limit=PROMPT_HISTORY):
+def recent_prompts(limit=PROMPT_HISTORY, session_id=None):
+    """This session's messages, plus the shared file for anything written
+    before histories were split per session."""
     out = []
-    try:
-        with io.open(PROMPTS_FILE, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception:
-        return []
+    if session_id:
+        # A named session sees its own history plus anything written before
+        # histories were split. It must NOT see other sessions, or one
+        # session's licence would authorise another's work.
+        paths = [prompts_file(session_id), PROMPTS_FILE]
+    else:
+        # Session unknown, which is the hand-opened `current-task.json` case.
+        # Scan everything, because refusing a real quote for want of a session
+        # id is the failure mode this whole change exists to remove.
+        paths = [PROMPTS_FILE]
+        try:
+            for name in sorted(os.listdir(RECORDS_DIR)):
+                if name.startswith("prompts-") and name.endswith(".jsonl"):
+                    paths.append(os.path.join(RECORDS_DIR, name))
+        except Exception:
+            pass
+    for path in paths:
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except Exception:
+                        continue
+        except Exception:
+            continue
     return out[-limit:]
 
 
-def citation_matches(citation):
+def citation_matches(citation, session_id=None):
     """(found, why). Is this quote actually something Bob said recently?
 
     Substring match on normalised text. Deliberately not fuzzy: the point is
@@ -312,7 +364,7 @@ def citation_matches(citation):
     c = normalise(citation)
     if not c:
         return False, "a citation cannot be empty"
-    for entry in recent_prompts():
+    for entry in recent_prompts(session_id=session_id):
         whole = normalise(entry.get("text"))
         if not whole:
             continue
@@ -339,7 +391,7 @@ def open_task(what, citation, session_id=None, prompt_id=None):
     """(ok, message). Refuses a task whose citation Bob did not say."""
     if not what or len(what.strip()) < 8:
         return False, "a task must say what is being done"
-    ok, why = citation_matches(citation)
+    ok, why = citation_matches(citation, session_id)
     if not ok:
         return False, why
     _ensure_dir()
