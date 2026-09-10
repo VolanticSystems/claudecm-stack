@@ -190,9 +190,18 @@ $recCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/record-prompt.py"'
 $outCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-output.py"'
 
 # Drop any previous copy of ours first, so re-running does not duplicate.
+#
+# This list must name EVERY guard the installer adds below. guard-worklog was
+# added without being listed here, so each reinstall appended another copy of
+# it: two entries by the time anyone looked, and one more per run after that.
+# Harmless in verdict, since both reach the same answer, but it spawns a wasted
+# Python process on every tool call in every session and grows without bound.
+# Retired names stay listed so a reinstall also cleans a machine that has them.
+$OURS = 'guard-bash\.py|guard-write\.py|guard-tool\.py|guard-worklog\.py|' +
+        'guard-authorization\.py|guard-scope\.py'
 $kept = @($json.hooks.PreToolUse | Where-Object {
     $entry = $_
-    -not (@($entry.hooks) | Where-Object { $_.command -match 'guard-bash\.py|guard-write\.py|guard-tool\.py' })
+    -not (@($entry.hooks) | Where-Object { $_.command -match $OURS })
 })
 
 $kept += [pscustomobject]@{
@@ -272,6 +281,13 @@ if (-not $reparsed) {
     foreach ($m in [regex]::Matches($after, '[A-Za-z0-9_-]+\.py')) {
         $p = Join-Path $dstHooks $m.Value
         if (-not (Test-Path $p)) { Fault "settings.json names $($m.Value) but it is not in $dstHooks" }
+    }
+    # No guard may be wired twice. A duplicate is not wrong, only wasteful, but
+    # it grows by one on every reinstall and nothing else would ever report it.
+    foreach ($g in @('guard-bash.py', 'guard-write.py', 'guard-tool.py',
+                     'guard-worklog.py', 'record-prompt.py', 'guard-output.py')) {
+        $n = ([regex]::Matches($after, [regex]::Escape($g))).Count
+        if ($n -gt 1) { Fault "$g is wired $n times; it should appear once" }
     }
     $cmv = ($after -match 'cmv auto-trim')
     if ($cmv) { Good "the cmv trimmer survived" }
