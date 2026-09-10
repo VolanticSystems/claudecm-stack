@@ -115,6 +115,37 @@ for tool, ti in [
     check("refused with no task: %s %s" % (tool, str(ti)[:40]), got == "deny", got)
 
 print("")
+print("work record: redirects. A discard is a read; a file is a write")
+print("")
+
+# 2026-09-10: the first version of the redirect pattern matched `2>/dev/null`,
+# so `ls -la x 2>/dev/null` was refused as a state change. A guard blocking a
+# read is the precise failure this design exists to avoid, and it was shipped by
+# the guard built to avoid it. Three spellings of discard, one per shell.
+fresh()
+for cmd in [
+    "ls -la /c/Users/Bob/.claude/hooks/state/ 2>/dev/null",
+    "cat payload.json 2>/dev/null",
+    "grep -rn thing . 2>/dev/null",
+    "git status --short 2>&1",
+    "python tests/test_worklog.py 2>&1 | tail -1",
+    "ls -d /f/Backups/* 2>$null",
+    "find . -name '*.md' 2>/dev/null | head",
+    "wc -l < somefile.txt",
+]:
+    got, _ = call("Bash", {"command": cmd})
+    check("read, not gated: %s" % cmd[:52], got == "allow", got)
+
+for cmd in [
+    "echo hi > out.txt",
+    "echo more >> log.txt",
+    "python gen.py > report.md",
+    "somecmd 2> errors.log",
+]:
+    got, _ = call("Bash", {"command": cmd})
+    check("write, gated: %s" % cmd[:52], got == "deny", got)
+
+print("")
 print("work record: an inline interpreter that writes is a state change")
 print("")
 

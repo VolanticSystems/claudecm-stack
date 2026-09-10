@@ -73,7 +73,14 @@ MUTATING_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 MUTATING_BASH = (
     r"\brm\b", r"\bmv\b", r"\bcp\b", r"\bmkdir\b", r"\brmdir\b",
     r"\btouch\b", r"\bchmod\b", r"\bchown\b", r"\bln\b",
-    r">>?\s*[^&|\s]", r"\btee\b",
+    # A redirect that writes a FILE. The three exclusions are not cosmetic:
+    # `2>/dev/null` and `2>&1` appear in most ordinary read commands, and the
+    # first version of this pattern matched them, so `ls -la x 2>/dev/null` was
+    # refused as a state change. That is the precise failure Bob banned, a guard
+    # blocking a read, shipped by the guard built to stop it. Found 2026-09-10.
+    # Three spellings of "discard this", one per shell: POSIX, cmd, PowerShell.
+    r">>?\s*(?!&)(?!/dev/null)(?![Nn][Uu][Ll]\b)(?!\$[Nn]ull\b)[^\s&|>]+",
+    r"\btee\b",
     r"\bgit\s+(commit|push|merge|rebase|reset|checkout|revert|clean|stash|tag|apply|cherry-pick)\b",
     r"\b(npm|pnpm|yarn|pip|pip3|poetry|cargo|gem|apt|apt-get|choco|winget)\s+(install|add|remove|uninstall|update|upgrade)\b",
     r"\bSet-Content\b", r"\bAdd-Content\b", r"\bRemove-Item\b", r"\bNew-Item\b",
