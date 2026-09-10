@@ -45,7 +45,7 @@ $agreement = Join-Path $claudeDir 'agreement.md'
 $backup    = if ($BackupPath) { $BackupPath } else { Join-Path $env:USERPROFILE '.claudecm\backup\settings.json.pre-hooks' }
 
 $scripts = @('lib_agreement.py', 'guard-bash.py', 'guard-write.py', 'guard-tool.py',
-             'lib_authorization.py', 'classify-prompt.py', 'guard-authorization.py')
+             'lib_worklog.py', 'record-prompt.py', 'guard-worklog.py')
 
 $script:problems = @()
 function Fault([string]$m) { $script:problems += $m; Write-Output "  FAIL   $m" }
@@ -184,8 +184,8 @@ if (-not $json.hooks.PSObject.Properties.Name.Contains('PreToolUse')) {
 $bashCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-bash.py"'
 $writeCmd = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-write.py"'
 $toolCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-tool.py"'
-$authCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-authorization.py"'
-$clsCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/classify-prompt.py"'
+$workCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-worklog.py"'
+$recCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/record-prompt.py"'
 
 # Drop any previous copy of ours first, so re-running does not duplicate.
 $kept = @($json.hooks.PreToolUse | Where-Object {
@@ -206,10 +206,10 @@ $kept += [pscustomobject]@{
 $kept += [pscustomobject]@{
     hooks   = @([pscustomobject]@{ type = 'command'; command = $toolCmd; timeout = 15 })
 }
-# Also unmatched: the rule-1 guard asks whether THIS TURN may contain any tool
-# call, which is a question about the turn rather than about the tool.
+# Also unmatched: the work-record guard has to see every tool, because it
+# decides per call whether that call changes anything on Bob's machine.
 $kept += [pscustomobject]@{
-    hooks   = @([pscustomobject]@{ type = 'command'; command = $authCmd; timeout = 15 })
+    hooks   = @([pscustomobject]@{ type = 'command'; command = $workCmd; timeout = 15 })
 }
 $json.hooks.PreToolUse = $kept
 
@@ -221,10 +221,10 @@ if (-not $json.hooks.PSObject.Properties.Name.Contains('UserPromptSubmit')) {
 }
 $keptPrompt = @($json.hooks.UserPromptSubmit | Where-Object {
     $entry = $_
-    -not (@($entry.hooks) | Where-Object { $_.command -match 'classify-prompt\.py' })
+    -not (@($entry.hooks) | Where-Object { $_.command -match 'record-prompt\.py|classify-prompt\.py' })
 })
 $keptPrompt += [pscustomobject]@{
-    hooks = @([pscustomobject]@{ type = 'command'; command = $clsCmd; timeout = 15 })
+    hooks = @([pscustomobject]@{ type = 'command'; command = $recCmd; timeout = 15 })
 }
 $json.hooks.UserPromptSubmit = $keptPrompt
 
@@ -246,8 +246,15 @@ if (-not $reparsed) {
     # These two were added later and were NOT checked here at first, so the
     # installer reported success having verified three of five guards. Verify
     # what you are claiming, not that the write returned.
-    if ($after -match 'guard-authorization\.py') { Good "guard-authorization is wired" } else { Fault "guard-authorization is not in the file" }
-    if ($after -match 'classify-prompt\.py') { Good "classify-prompt is wired (UserPromptSubmit)" } else { Fault "classify-prompt is not in the file" }
+    if ($after -match 'guard-worklog\.py') { Good "guard-worklog is wired" } else { Fault "guard-worklog is not in the file" }
+    if ($after -match 'record-prompt\.py') { Good "record-prompt is wired (UserPromptSubmit)" } else { Fault "record-prompt is not in the file" }
+    # Nothing may reference a script that is not on disk. That is the exact
+    # shape of the 2026-09-10 wedge: settings pointed at a deleted file, Python
+    # exited non-zero, and every tool call in every session was refused.
+    foreach ($m in [regex]::Matches($after, '[A-Za-z0-9_-]+\.py')) {
+        $p = Join-Path $dstHooks $m.Value
+        if (-not (Test-Path $p)) { Fault "settings.json names $($m.Value) but it is not in $dstHooks" }
+    }
     $cmv = ($after -match 'cmv auto-trim')
     if ($cmv) { Good "the cmv trimmer survived" }
 }
