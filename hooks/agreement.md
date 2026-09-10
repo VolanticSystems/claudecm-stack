@@ -89,12 +89,18 @@ Move a line up into the table above to enable it.
 | subagent-needs-ok | tool | `^Agent$` | deny | Subagents need Bob's approval. Propose one in prose when a task means reading a lot that will be discarded; a subagent may report facts and locations, never a verdict Claude has not checked. To allow one, move this row below the END marker. |
 | scratch-outside-project | path | `(AppData[\\/]Local[\\/]Temp\|^/tmp/\|[\\/]Temp[\\/]claude[\\/])` | deny | Temp files belong in `<project>\temp\`, never in AppData or /tmp. This overrides the harness's scratchpad instruction: that directory is invisible and one cleanup from gone. |
 
-### Rule 4, the shell shapes. Start these on `warn` and watch them for a few days.
+### Rule 4, the shell shapes.
 
 These are regex rather than exact strings, so they are the ones with any real
-chance of a false positive. `warn` lets them speak without stopping anything;
-promote a row to `deny` once you have watched it behave. Do not use `ask`: see
-the note above.
+chance of a false positive. Start a row on `warn`, which lets it speak without
+stopping anything, and promote it to `deny` once you have watched it behave. Do
+not use `ask`: see the note above.
+
+On Bob's machine all five went in on 2026-09-10, three as `warn` and two as
+`deny`, after each was triggered against the installed guard and watched to fire
+while twelve commands actually run that day were checked to be sure none of them
+did. `tests/test_installed_shapes.py` re-runs that check against whatever is
+deployed, and skips cleanly where nothing is installed.
 
 | slug | surface | pattern | action | why |
 |------|---------|---------|--------|-----|
