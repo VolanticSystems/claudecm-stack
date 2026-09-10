@@ -341,6 +341,95 @@ try:
           proc.returncode == 0 and decision(proc.stdout) is None,
           (proc.returncode, proc.stdout))
 
+    # ------------------------------------------------ the bootstrap exemption
+    # Found live on 2026-09-10, the first hour the guards ran: a rule row
+    # necessarily contains the pattern it matches, so writing that row tripped
+    # the rule and the agreement became uneditable. Without the exemption a bad
+    # pattern can never be corrected.
+    print("")
+    print("work agreement: the agreement file is not subject to its own rules")
+    print("")
+
+    stub = "a [Trimmed input: ~%d chars] b" % 1523
+    rc, out, _ = run_hook(GUARD_WRITE, {
+        "tool_name": "Write",
+        "tool_input": {"file_path": pw, "content": stub}}, pw)
+    check("writing the AGREEMENT file itself is exempt",
+          decision(out) is None, out[:200])
+    check("and the exemption is announced, never silent",
+          "skipped" in out and "agreement" in out, out[:250])
+
+    rc, out, _ = run_hook(GUARD_WRITE, {
+        "tool_name": "Write",
+        "tool_input": {"file_path": os.path.join(tmp, "ordinary.md"), "content": stub}}, pw)
+    check("the exemption does NOT leak to an ordinary file",
+          decision(out) == "deny", out[:200])
+
+    # A path that merely looks similar must not be exempt, or the carve-out is
+    # a hole rather than a carve-out.
+    rc, out, _ = run_hook(GUARD_WRITE, {
+        "tool_name": "Write",
+        "tool_input": {"file_path": pw + ".bak", "content": stub}}, pw)
+    check("a lookalike path (agreement.md.bak) is NOT exempt",
+          decision(out) == "deny", out[:200])
+
+    # ------------------------- no-ai-attribution: the trailer vs mentioning it
+    # Found live on 2026-09-10. The rule matched the bare string, so a command
+    # grepping to CHECK for a trailer was refused, as was any command that
+    # merely mentioned it. The rule is for a trailer landing in a commit
+    # MESSAGE, so it is scoped to the inline -m form.
+    print("")
+    print("work agreement: no-ai-attribution catches the trailer, not the word")
+    print("")
+
+    attr_row = menu_row("no-ai-attribution")
+    check("no-ai-attribution is present in the shipped menu", attr_row is not None)
+    if attr_row:
+        pa = make_agreement(tmp, [attr_row], name="attr.md")
+        trailer = "Co-" + "Authored-By"
+        for label, command, expected in [
+            ("a real inline trailer",
+             'git commit -m "fix\n\n%s: Claude <a@b>"' % trailer, "deny"),
+            ("the same in single quotes",
+             "git commit -m 'fix\n\n%s: Claude'" % trailer, "deny"),
+            ("grepping to CHECK for one",
+             'git log -1 --format=%%B | grep -iE "^%s"' % trailer, None),
+            ("committing from a file, then verifying",
+             'git commit -F m.txt; git log -1 | grep -i "%s"' % trailer, None),
+            ("mentioning it while editing docs",
+             'grep -rn "%s" docs/' % trailer, None),
+            ("an ordinary commit", 'git commit -m "ordinary message"', None),
+        ]:
+            rc, out, _ = run_hook(GUARD_BASH, bash_payload(command), pa)
+            check("no-ai-attribution: %s -> %s" % (label, expected or "allow"),
+                  decision(out) == expected, out[:160])
+
+    # --------------------------------- the trim pattern: real stub vs the docs
+    print("")
+    print("work agreement: trim-stub matches corruption, not documentation")
+    print("")
+
+    real_rows = [r for r in [menu_row("trim-stub"), menu_row("trim-stub-result")] if r]
+    check("both trim rules are present in the shipped menu", len(real_rows) == 2)
+    if len(real_rows) == 2:
+        pt2 = make_agreement(tmp, real_rows, name="trim.md")
+        target = os.path.join(tmp, "doc.md")
+
+        for kind in ("input", "tool result"):
+            corrupted = "before [Trimmed %s: ~4096 chars] after" % kind
+            rc, out, _ = run_hook(GUARD_WRITE, {
+                "tool_name": "Write",
+                "tool_input": {"file_path": target, "content": corrupted}}, pt2)
+            check("a REAL %s stub (with a digit count) is denied" % kind,
+                  decision(out) == "deny", out[:160])
+
+            documented = "the placeholder is [Trimmed %s: ~N chars] in prose" % kind
+            rc, out, _ = run_hook(GUARD_WRITE, {
+                "tool_name": "Write",
+                "tool_input": {"file_path": target, "content": documented}}, pt2)
+            check("but DOCUMENTING the %s placeholder is allowed" % kind,
+                  decision(out) is None, out[:160])
+
     # ------------------------------------------------------------- guard-tool
     print("")
     print("work agreement: guard-tool.py (tool and path surfaces)")
