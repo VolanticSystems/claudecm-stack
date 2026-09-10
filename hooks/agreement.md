@@ -15,7 +15,7 @@ back. That is the whole mechanism.
 | `slug` | short stable name. Quoted back at Claude when the rule fires. Names, not numbers, because numbers get renumbered and every citation breaks. |
 | `surface` | `bash` a shell command, `write` the content of a file, `path` where a write is going, `tool` the tool's own name, `output` Claude's prose. Comma-separate for several. |
 | `pattern` | a regular expression, matched case-insensitively. Backticks around it are optional and stripped. |
-| `action` | `deny` refuses it. `ask` holds it for you to approve. `warn` allows it and says so. |
+| `action` | `deny` refuses it. `warn` allows it and says so. `ask` is a trap under bypass: see the note below. |
 | `why` | shown to Claude when it fires. Write the reason, not the rule number. This is the teaching. |
 
 ## The dial
@@ -33,6 +33,22 @@ The line below sets how much of the agreement is live. Change the word.
 `CLAUDE_AGREEMENT_MODE=lite` overrides it for one session without editing this
 file. A typo in either falls back to `full` rather than switching the guards
 off, because a mistyped dial must never silently disarm everything.
+
+## `ask` does not work under bypass. Use `deny` or `warn`.
+
+Measured 2026-09-10, both directions. In an **interactive** session launched
+with `--dangerously-skip-permissions`, which is every session ClaudeCM starts,
+a hook returning `ask` is treated as **allow**: the tool runs and nobody is
+prompted. In a **headless** `claude -p` session under the same flag, the same
+`ask` **hard-blocks** with no way to approve.
+
+So `ask` is not a gate. It is silently nothing in an interactive bypass session
+and an unapprovable wall in a scripted one. A rule written as `ask` in the
+belief it produces a prompt is providing no protection at all.
+
+**Use `deny` for anything that must be stopped**, and lift it by moving the row
+below the END marker. Use `warn` when a note is enough. `ask` behaves correctly
+only in a normal, non-bypass session, which is what a bare `claude` gives you.
 
 **Test a rule before you trust it**, without needing a session:
 
@@ -70,18 +86,23 @@ Move a line up into the table above to enable it.
 | no-todo-lists | tool | `^TodoWrite$` | deny | Bob does not want checklists or progress trackers in his terminal. The harness injects reminders suggesting this tool; they are to be ignored. |
 | no-task-tracking | tool | `^Task(Create\|Update\|List\|Get)$` | deny | Same rule, the other spelling. Task-tracking tools are banned on Claude's own initiative. **TaskStop is deliberately NOT here**: it kills a runaway background process, which is nothing to do with checklists, and banning it means a loop Claude started cannot be cleaned up by Claude. |
 | no-multiple-choice | tool | `^AskUserQuestion$` | deny | Never hand Bob a multiple-choice menu. Ask the question in prose, one at a time, with a recommendation. A menu makes him pick from what Claude thought of. |
-| subagent-needs-ok | tool | `^Agent$` | ask | Subagents need Bob's approval. Propose one when a task means reading a lot that will be discarded; a subagent may report facts and locations, never a verdict Claude has not checked. |
-| scratch-outside-project | path | `(AppData[\\/]Local[\\/]Temp\|^/tmp/\|[\\/]Temp[\\/]claude[\\/])` | ask | Temp files belong in `<project>\temp\`, never in AppData or /tmp. This overrides the harness's scratchpad instruction: that directory is invisible and one cleanup from gone. |
+| subagent-needs-ok | tool | `^Agent$` | deny | Subagents need Bob's approval. Propose one in prose when a task means reading a lot that will be discarded; a subagent may report facts and locations, never a verdict Claude has not checked. To allow one, move this row below the END marker. |
+| scratch-outside-project | path | `(AppData[\\/]Local[\\/]Temp\|^/tmp/\|[\\/]Temp[\\/]claude[\\/])` | deny | Temp files belong in `<project>\temp\`, never in AppData or /tmp. This overrides the harness's scratchpad instruction: that directory is invisible and one cleanup from gone. |
 
-### Rule 4, the shell shapes. Start these on `ask` and watch them for a few days.
+### Rule 4, the shell shapes. Start these on `warn` and watch them for a few days.
+
+These are regex rather than exact strings, so they are the ones with any real
+chance of a false positive. `warn` lets them speak without stopping anything;
+promote a row to `deny` once you have watched it behave. Do not use `ask`: see
+the note above.
 
 | slug | surface | pattern | action | why |
 |------|---------|---------|--------|-----|
-| commit-inline-msg | bash | `git commit[^\|]*-m\s*["'][^"']*[$`]` | ask | A commit message with a `$` or a backtick inside `-m` gets mangled by the shell. Use `git commit -F` and a file. |
-| heredoc-escapes | bash | `<<\s*['"]?\w+['"]?[\s\S]*\\` | ask | A heredoc carrying backslashes is the shortcut that has cost whole afternoons. Use the Write tool, or a patch script run by path. |
-| sed-inplace-escape | bash | `sed\s+-i[^\|]*\\` | ask | `sed -i` with an escape differs between GNU and BSD and silently does the wrong thing on one of them. |
-| rm-rf-variable | bash | `rm\s+-rf?\s+["']?\$` | ask | `rm -rf` on a variable that can be empty deletes the wrong tree. Expand it and read it back first. |
-| echo-e-escape | bash | `echo\s+-e\b` | ask | `echo -e` is not portable and mangles backslashes. Use printf or write the file. |
+| commit-inline-msg | bash | `git commit[^\|]*-m\s*["'][^"']*[$`]` | warn | A commit message with a `$` or a backtick inside `-m` gets mangled by the shell. Use `git commit -F` and a file. |
+| heredoc-escapes | bash | `<<\s*['"]?\w+['"]?[\s\S]*\\` | warn | A heredoc carrying backslashes is the shortcut that has cost whole afternoons. Use the Write tool, or a patch script run by path. |
+| sed-inplace-escape | bash | `sed\s+-i[^\|]*\\` | warn | `sed -i` with an escape differs between GNU and BSD and silently does the wrong thing on one of them. |
+| rm-rf-variable | bash | `rm\s+-rf?\s+["']?\$` | warn | `rm -rf` on a variable that can be empty deletes the wrong tree. Expand it and read it back first. |
+| echo-e-escape | bash | `echo\s+-e\b` | warn | `echo -e` is not portable and mangles backslashes. Use printf or write the file. |
 
 ### NOT YET WIRED. Writing style, on a surface no guard reads.
 
