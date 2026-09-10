@@ -209,7 +209,10 @@ try:
         ("no-em-dash", "output", "this thing \u2014 that thing", "this thing, that thing"),
         ("no-honesty-tic", "output", "Honestly, this works.", "This works."),
         ("no-todo-lists", "tool", "TodoWrite", "Write"),
-        ("no-task-tracking", "tool", "TaskCreate", "Task"),
+        # TaskStop is the negative case on purpose. It kills a runaway
+        # background process rather than tracking anything, and banning it once
+        # left a spinning loop that Claude had started and could not stop.
+        ("no-task-tracking", "tool", "TaskCreate", "TaskStop"),
         ("no-multiple-choice", "tool", "AskUserQuestion", "Read"),
         ("subagent-needs-ok", "tool", "Agent", "Agentic"),
         ("scratch-outside-project", "path",
