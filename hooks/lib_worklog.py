@@ -50,7 +50,21 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.join(HERE, "state")
 
+# A task belongs to ONE session. The first version used a single global file,
+# so three instances in three projects shared one licence: instance A opened a
+# task and instance B inherited it, which is the opposite of what this is for.
+# Found 2026-09-10 while investigating a hook collision in another project.
+#
+# The unkeyed name is still read when no session is given, so a task opened by
+# hand keeps working.
 TASK_FILE = os.path.join(STATE_DIR, "current-task.json")
+
+
+def task_file(session_id=None):
+    if not session_id:
+        return TASK_FILE
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", str(session_id))[:64]
+    return os.path.join(STATE_DIR, "task-%s.json" % safe)
 PROMPTS_FILE = os.path.join(STATE_DIR, "prompts.jsonl")
 LOG_FILE = os.path.join(STATE_DIR, "worklog.md")
 
@@ -260,19 +274,26 @@ def open_task(what, citation, session_id=None, prompt_id=None):
         "session": session_id,
         "prompt_id": prompt_id,
     }
-    tmp = TASK_FILE + ".tmp-%d" % os.getpid()
+    dest = task_file(session_id)
+    tmp = dest + ".tmp-%d" % os.getpid()
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(task, indent=2))
-    os.replace(tmp, TASK_FILE)          # the rename is the publish
+    os.replace(tmp, dest)               # the rename is the publish
     log("OPENED", what.strip(), citation.strip())
     return True, why
 
 
-def current_task():
-    try:
-        with io.open(TASK_FILE, encoding="utf-8") as fh:
-            task = json.load(fh)
-    except Exception:
+def current_task(session_id=None):
+    """This session's task, falling back to an unkeyed one opened by hand."""
+    task = None
+    for path in (task_file(session_id), TASK_FILE):
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                task = json.load(fh)
+            break
+        except Exception:
+            continue
+    if task is None:
         return None
     try:
         age = (_now().timestamp() - float(task.get("opened_at") or 0)) / 3600.0
@@ -283,14 +304,15 @@ def current_task():
     return task
 
 
-def close_task(reason="finished"):
-    task = current_task()
+def close_task(reason="finished", session_id=None):
+    task = current_task(session_id)
     if task:
         log("CLOSED", task.get("what", ""), task.get("citation", ""), reason)
-    try:
-        os.remove(TASK_FILE)
-    except Exception:
-        pass
+    for path in (task_file(session_id), TASK_FILE):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- the gate
