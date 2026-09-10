@@ -53,6 +53,10 @@ ACTION_VERBS = {
     # Things he asks for by name often enough to be worth listing.
     "save", "read", "prepare", "schedule", "register", "document", "zip",
     "back", "sync", "verify", "test", "cleanup", "quarantine", "narrow",
+    # "Double check" is what broke it the third time. These are safe because a
+    # sentence opening as a question is skipped before they are reached, so
+    # "can you check this?" and "should we look?" are still questions.
+    "check", "look", "inspect", "examine", "recheck", "reread",
 }
 
 # Verbs that, used as an instruction, ask for WORDS. Grammatically imperative,
@@ -146,6 +150,23 @@ def _words(text):
     return [w for w in re.sub(r"[^a-z0-9'\s-]", " ", text.lower()).split() if w]
 
 
+# Words that sit in front of the verb that actually matters. "Double check the
+# report" is an instruction whose action word is `check`, in second position;
+# reading only the first word finds `double`, which is in no list, and the whole
+# message falls through to "ambiguous stops".
+#
+# Found on 2026-09-10, the third rule-1 false positive of the day, when the
+# guard refused "The report was updated. Double check." Each of these is
+# transparent: skip it and look at what follows.
+# Articles and bare prepositions are deliberately NOT here. Including "the"
+# would make "the review is done" surface `review`, an action verb, and turn a
+# plain statement into authorisation. Only words that genuinely precede a verb.
+VERB_PREFIXES = {
+    "double", "go", "come", "take", "try", "help", "keep",
+    "quickly", "carefully", "first", "again",
+}
+
+
 def _leading_verb(sentence):
     """The first meaningful word of a sentence, skipping politeness and
     connectives, so "ok now go fix it" still surfaces `go`."""
@@ -156,6 +177,47 @@ def _leading_verb(sentence):
         if w not in skip:
             return w
     return None
+
+
+def _stems(word):
+    """Crude -ing stems, for the word that FOLLOWS a verb prefix.
+
+    "try running" and "keep going" carry the action in a participle. Applied
+    only after a prefix, never to the first word of a clause: "running the
+    tests took an hour" is a statement, and stemming it there would turn plain
+    description into authorisation.
+    """
+    out = [word]
+    if word.endswith("ing") and len(word) >= 5:
+        base = word[:-3]
+        out.append(base)                                  # going -> go
+        if len(base) > 2 and base[-1] == base[-2]:
+            out.append(base[:-1])                         # running -> run
+        out.append(base + "e")                            # writing -> write
+    return out
+
+
+def _leading_verbs(sentence):
+    """Every candidate verb at the head of a clause, not just the first.
+
+    Returns the leading word and, where that word is a transparent prefix, the
+    word after it. "double check" yields both `double` and `check`; "go look at
+    it" yields `go` and `look`. Either being an action verb is enough.
+    """
+    skip = {"ok", "okay", "so", "well", "now", "then", "and", "but", "also",
+            "please", "just", "alright", "yeah", "yes", "sure", "fine",
+            "lets", "let's", "let", "us", "we", "you", "i", "maybe", "perhaps"}
+    words = [w for w in _words(sentence) if w not in skip]
+    if not words:
+        return []
+    out = [words[0]]
+    # Walk forward through transparent prefixes, so "go take a look" reaches
+    # `look`. Bounded, because a long noun phrase must not become a verb hunt.
+    i = 0
+    while i < 3 and i + 1 < len(words) and words[i] in VERB_PREFIXES:
+        out.append(words[i + 1])
+        i += 1
+    return out
 
 
 def classify(prompt):
@@ -272,9 +334,11 @@ def _has_action_imperative(text):
 
     for s in _sentences(text):
         w = _words(s)
-        v = _leading_verb(s)
-        if v is None:
+        candidates = _leading_verbs(s)
+        if not candidates:
             continue
+        v = candidates[0]
+
         # "do" is both an action verb and a question opener. "do you think"
         # is a question; "do everything" is an instruction. The word after it
         # decides.
@@ -284,8 +348,18 @@ def _has_action_imperative(text):
             if nxt in ("you", "we", "i", "they"):
                 continue
             return True
+
+        # A sentence that OPENS as a question is not an instruction, however
+        # many action verbs follow: "should we double check this?" is a query.
         if v in QUESTION_OPENERS:
             continue
-        if v in ACTION_VERBS:
+
+        # The first candidate is matched as written. Later ones came from a
+        # transparent prefix, so they are also stemmed: "try running" and
+        # "keep going" carry the action in a participle.
+        if candidates[0] in ACTION_VERBS:
             return True
+        for c in candidates[1:]:
+            if any(s in ACTION_VERBS for s in _stems(c)):
+                return True
     return False
