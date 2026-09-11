@@ -34,6 +34,29 @@ The line below sets how much of the agreement is live. Change the word.
 file. A typo in either falls back to `full` rather than switching the guards
 off, because a mistyped dial must never silently disarm everything.
 
+## Authorization is not this file's job any more
+
+Changed 2026-09-11. ClaudeCM used to launch every session with
+`--dangerously-skip-permissions`. Bypass switches OFF plan mode and the
+auto-mode classifier, which are Claude Code's own protections against an
+instance acting beyond what was asked: *"Except in sessions with bypass
+permissions available, edits stay blocked until you approve the plan."* So the
+machine had no authorization layer, and one was built here by hand.
+
+The interactive launches now use `--permission-mode auto`. A classifier model
+reviews each action and blocks anything that escalates beyond the request, with
+no routine prompts, which was the whole reason bypass was there. The homegrown
+replacement measured a 13% leak against 100 hand-labelled messages; one model
+trained for the job beats word lists.
+
+**So this file is for preferences a classifier cannot know**: that Bob hates em
+dashes and multiple-choice menus, that an AI attribution trailer must never
+reach a commit, that a corrupted payload must never be written. Not for deciding
+whether work was authorised.
+
+The two headless `-p` launches keep bypass, because nobody is there to answer if
+the classifier holds something.
+
 ## `ask` does not work under bypass. Use `deny` or `warn`.
 
 Measured 2026-09-10, both directions. In an **interactive** session launched

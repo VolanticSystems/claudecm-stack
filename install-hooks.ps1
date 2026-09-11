@@ -30,6 +30,16 @@
 [CmdletBinding()]
 param(
     [switch]$Check,
+    # The work record (guard-worklog) is DEACTIVATED as of 2026-09-11, when
+    # ClaudeCM moved from --dangerously-skip-permissions to --permission-mode
+    # auto. Bypass had been switching off plan mode and the auto-mode
+    # classifier, so the machine had no authorization layer and one was built
+    # here by hand; Anthropic's classifier now does that job.
+    #
+    # The script is still installed and this switch puts it back, so the
+    # decision is reversible in one command. It is off by default so a routine
+    # reinstall cannot quietly restore a gate Bob turned off.
+    [switch]$WithWorkRecord,
     [string]$ClaudeDir,
     [string]$BackupPath
 )
@@ -217,10 +227,11 @@ $kept += [pscustomobject]@{
 $kept += [pscustomobject]@{
     hooks   = @([pscustomobject]@{ type = 'command'; command = $toolCmd; timeout = 15 })
 }
-# Also unmatched: the work-record guard has to see every tool, because it
-# decides per call whether that call changes anything on Bob's machine.
-$kept += [pscustomobject]@{
-    hooks   = @([pscustomobject]@{ type = 'command'; command = $workCmd; timeout = 15 })
+# The work-record guard, only when explicitly asked for. See -WithWorkRecord.
+if ($WithWorkRecord) {
+    $kept += [pscustomobject]@{
+        hooks   = @([pscustomobject]@{ type = 'command'; command = $workCmd; timeout = 15 })
+    }
 }
 $json.hooks.PreToolUse = $kept
 
@@ -272,7 +283,13 @@ if (-not $reparsed) {
     # These two were added later and were NOT checked here at first, so the
     # installer reported success having verified three of five guards. Verify
     # what you are claiming, not that the write returned.
-    if ($after -match 'guard-worklog\.py') { Good "guard-worklog is wired" } else { Fault "guard-worklog is not in the file" }
+    if ($WithWorkRecord) {
+        if ($after -match 'guard-worklog\.py') { Good "guard-worklog is wired (-WithWorkRecord)" } else { Fault "guard-worklog was requested but is not in the file" }
+    } elseif ($after -match 'guard-worklog\.py') {
+        Fault "guard-worklog is wired but was not requested; it is deactivated by default"
+    } else {
+        Good "guard-worklog is deactivated (pass -WithWorkRecord to restore)"
+    }
     if ($after -match 'record-prompt\.py') { Good "record-prompt is wired (UserPromptSubmit)" } else { Fault "record-prompt is not in the file" }
     if ($after -match 'guard-output\.py') { Good "guard-output is wired (Stop)" } else { Fault "guard-output is not in the file" }
     # Nothing may reference a script that is not on disk. That is the exact

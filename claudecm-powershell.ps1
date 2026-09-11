@@ -1162,10 +1162,28 @@ IMPORTANT:
                 Start-Process -FilePath 'pwsh' -WindowStyle Hidden -ArgumentList $spArgs | Out-Null
             }
         } catch {}
+        # AUTO, NOT BYPASS. Changed 2026-09-11.
+        #
+        # Bypass exists so Bob is not pressing yes all day, and that need is
+        # real. But it also switches off plan mode and the auto-mode
+        # classifier, which are Claude Code's own protections against an
+        # instance acting beyond what was asked. In bypass, "edits stay blocked
+        # until you approve the plan" simply does not apply (anthropics/
+        # claude-code#39687), so the machine had no authorization layer at all.
+        #
+        # Auto mode keeps the part he wants, no routine prompts, and restores
+        # the part he was missing: a separate classifier model reviews each
+        # action first and blocks anything that escalates beyond the request.
+        # One model trained for the job beats the word lists tried here, which
+        # measured a 13% leak on 100 of his own hand-labelled messages.
+        #
+        # INTERACTIVE ONLY. The two headless `-p` sites keep bypass: nobody is
+        # there to answer if the classifier holds something, and each runs a
+        # single scripted prompt, so the surface is small.
         if ($passArgs -and $passArgs.Count -gt 0) {
-            & $claudeExe --dangerously-skip-permissions -n $displayName @passArgs
+            & $claudeExe --permission-mode auto -n $displayName @passArgs
         } else {
-            & $claudeExe --dangerously-skip-permissions -n $displayName
+            & $claudeExe --permission-mode auto -n $displayName
         }
         $exitCode = $LASTEXITCODE
         $newGuid = $null
@@ -1222,7 +1240,8 @@ IMPORTANT:
         }
         Write-Host ""
         Write-Host ""
-        & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName
+        # Auto, not bypass. See the note at the new-session launch above.
+        & $claudeExe --permission-mode auto --resume $originalGuid -n $displayName
         $exitCode = $LASTEXITCODE
         $effectiveGuid = $originalGuid
         # Retry-with-prompt recovery. Claude Code's --resume scans the JSONL tail
@@ -1236,7 +1255,7 @@ IMPORTANT:
             Write-Host "  The conversation is intact; Claude just needs an initial prompt to pick up."
             $retryAns = Read-Host "  Would you like to retry with a prompt that says `"please continue`"? [Y/n]"
             if ($retryAns -ne 'n' -and $retryAns -ne 'N') {
-                & $claudeExe --dangerously-skip-permissions --resume $originalGuid -n $displayName "please continue"
+                & $claudeExe --permission-mode auto --resume $originalGuid -n $displayName "please continue"
                 $exitCode = $LASTEXITCODE
             }
         }
