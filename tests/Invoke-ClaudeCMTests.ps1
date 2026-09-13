@@ -779,9 +779,10 @@ Test-Case -Name 'Do-Trim swaps the GUID in sessions.txt and keeps the row' `
 Test-Case -Name 'Do-PostExit bumps the exited session to the top (MRU)' `
     -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine',
             'Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock',
-            'Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Get-SessionInfo','Do-PostExit') `
-    -Sabotage 'stop reordering in Do-PostExit and write the list back untouched, so the exited session keeps its old position and sessions.txt is no longer MRU' `
-    -Mutate @{ 'Do-PostExit' = @{
+            'Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Get-SessionInfo',
+            'Save-ExitState','Save-ExitSnapshot','Offer-Trim','Do-PostExit') `
+    -Sabotage 'stop reordering in Save-ExitState and write the list back untouched, so the exited session keeps its old position and sessions.txt is no longer MRU' `
+    -Mutate @{ 'Save-ExitState' = @{
         Find    = '$sessions = @($existing) + @($sessions | Where-Object { $_.Guid -ne $guid })'
         Replace = '$sessions = $sessions' } } `
     -Body {
@@ -802,6 +803,58 @@ Test-Case -Name 'Do-PostExit bumps the exited session to the top (MRU)' `
         Assert-True ($rows[0].StartsWith($target)) `
             'the session that just exited must be row 1: sessions.txt is most-recently-used order'
         Assert-Equal 3 $rows.Count 'no session may be lost or duplicated by the reorder'
+    }
+
+Test-Case -Name 'Do-PostExit writes sessions.txt before anything slow can kill the console' `
+    -Uses @('Get-ProjectKey','Format-Tokens','Format-Size','Format-DateShort','Parse-SessionLine',
+            'Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock','Release-SessionsLock',
+            'Write-SessionsAtomic','Save-Sessions','Sync-SessionIndex','Get-SessionInfo',
+            'Save-ExitState','Offer-Trim','Do-PostExit') `
+    -Sabotage 'drop the durable write from Do-PostExit, which is what the old ordering amounted to whenever the console died during the two-minute snapshot spinner' `
+    -Mutate @{ 'Do-PostExit' = @{ Find = 'Save-ExitState $guid'; Replace = '' } } `
+    -Body {
+        # the operator closes the PowerShell window at the exit prompts. The snapshot can
+        # run for two minutes and the trim question waits on a human, so neither
+        # may come before the writes. Simulated here by a snapshot that dies.
+        function Save-ExitSnapshot($guid) { throw 'console closed during the snapshot' }
+        function Read-Host { param([string]$Prompt) throw "$script:AssertSentinel reached a prompt, so the write cannot have happened first" }
+        $target = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        Set-Content $sessionsFile @(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa|$($sandbox.Root)|First|1",
+            "$target|$($sandbox.Root)|Second|2"
+        ) -Encoding UTF8
+
+        try { Do-PostExit $target } catch { if ("$_" -like "*$script:AssertSentinel*") { throw } }
+
+        $rows = @(Get-Content $sessionsFile | Where-Object { $_.Trim() -ne '' })
+        Assert-True ($rows[0].StartsWith($target)) `
+            'sessions.txt must already be correct by the time anything can interrupt: closing the window costs nothing'
+        Assert-Equal 2 $rows.Count 'no session may be lost by an interrupted exit'
+    }
+
+Test-Case -Name 'Offer-Trim does not ask when auto-trim has already taken everything' `
+    -Uses @('Offer-Trim') `
+    -Sabotage 'ask regardless of the benchmark, which is the behaviour that trained the operator to answer a question whose answer was always no' `
+    -Mutate @{ 'Offer-Trim' = @{ Find = 'if ($pct -lt 10) {'; Replace = 'if ($false) {' } } `
+    -Body {
+        # CMV's auto-trim hooks stub tool results in place all session long, so
+        # the exit-time trim recovers 2% to 5% and cmv's own projections make it
+        # a net loss under 151 turns. Measured on four live sessions 2026-09-13.
+        function Read-Host { param([string]$Prompt) throw "$script:AssertSentinel asked about a trim worth 3%" }
+        $script:exitBench = [pscustomobject]@{
+            reductionPercent = 3; breakEvenTurns = 151
+            preTrimTokens = 201176; postTrimTokens = 194939 }
+        Offer-Trim 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+
+        # And it must still ask when the trim is worth taking.
+        $script:askedAbout = $null
+        function Read-Host { param([string]$Prompt) $script:askedAbout = $Prompt; 'N' }
+        $script:exitBench = [pscustomobject]@{
+            reductionPercent = 40; breakEvenTurns = 4
+            preTrimTokens = 200000; postTrimTokens = 120000 }
+        Offer-Trim 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        Assert-True ($script:askedAbout -like '*Trim this session*') `
+            'a trim worth 40% must still be offered'
     }
 
 Test-Case -Name 'Test-CleanExitTail recognises a trailing /exit' `

@@ -222,8 +222,8 @@ t_parse_four_fields() {
 }
 
 t_parse_desc_with_spaces() {
-    # paths on the operator's machine include 'Trading Platform 8'; unquoted expansion here
-    # would split the field
+    # Real project paths contain spaces; unquoted expansion here would split
+    # the field and the session would point at a directory that does not exist.
     __cm_parse_line 'g|/mnt/Trading Platform 8/bin|Trading platform indicators|'
     assert_eq "/mnt/Trading Platform 8/bin" "$__cm_d" "a DIR containing spaces must survive parsing" || return 90
     assert_eq "Trading platform indicators" "$__cm_desc" "a DESC containing spaces must survive parsing"
@@ -272,7 +272,7 @@ t_search_filters() {
     out="$(printf 'q\n' | claudecm -s context 2>&1)"
     [[ "$out" == *"Claude Context Manager"* ]]  || { echo "           a mid-name match must be found" >&2; return 90; }
     [[ "$out" == *"context switching notes"* ]] || { echo "           a start-of-name match must be found" >&2; return 90; }
-    [[ "$out" != *"Weather Widget"* ]]                || { echo "           a non-matching session must not be listed" >&2; return 90; }
+    [[ "$out" != *"Weather Widget"* ]]          || { echo "           a non-matching session must not be listed" >&2; return 90; }
     [[ "$out" == *"2 of 5"* ]]                  || { echo "           the count line must report matches out of total" >&2; return 90; }
     return 0
 }
@@ -414,6 +414,29 @@ t_trim_swaps_guid() {
         "the row must point at the trimmed transcript, or the session is unreachable" || return 90
     assert_true "$([[ "$first" == *"Keep My Name"* ]] && echo 0 || echo 1)" \
         "the session name must survive a trim"
+}
+
+t_post_exit_writes_before_anything_slow() {
+    # the operator closes the terminal at the exit prompts. The snapshot can run for a
+    # long time and the trim question waits on a human, so neither may come
+    # before the writes. Simulated here by a snapshot that kills the shell's
+    # progress: __cm_save_exit_snapshot is replaced with a hard failure.
+    local pd; pd=$(_mk_project exitproj)
+    local target="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    printf '{}\n' > "$pd/$target.jsonl"
+    printf 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa|%s|First|1\n%s|%s|Second|2\n' \
+        "$HOME/exitproj" "$target" "$HOME/exitproj" > "$__cm_sessions_file"
+
+    __cm_save_exit_snapshot() { return 1; }
+    __cm_offer_exit_actions() { return 0; }
+    __cm_resolve_cmv() { return 1; }
+    __cm_do_post_exit "$target" >/dev/null 2>&1
+
+    local rows; rows=$(__cm_get_sessions | wc -l | tr -d ' ')
+    assert_eq "2" "$rows" "no session may be lost by an interrupted exit" || return 90
+    local first; first=$(__cm_get_sessions | head -1)
+    assert_true "$([[ "$first" == "$target|"* ]] && echo 0 || echo 1)" \
+        "sessions.txt must already be MRU-correct before anything can interrupt the exit"
 }
 
 t_fork_followed_and_predecessor_filed() {
@@ -730,6 +753,10 @@ test_case "do_trim files the pre-trim transcript to the backup (spec 11.13 step 
 test_case "do_trim swaps the GUID in sessions.txt and keeps the row" \
     "keep the old GUID on the row, so sessions.txt points at a transcript that has just been filed away" \
     's|updated+=("\$new_guid\|\$d\|\$desc\|\$t")|updated+=("$g\|$d\|$desc\|$t")|' t_trim_swaps_guid
+
+test_case "post_exit writes sessions.txt before anything slow can kill the terminal" \
+    "drop the durable write from __cm_do_post_exit, which is what the old ordering amounted to whenever the terminal died during the snapshot" \
+    's|__cm_save_exit_state "\$guid"|:|' t_post_exit_writes_before_anything_slow
 
 test_case "a forked resume follows the fork and files the predecessor (spec 11.6.1)" \
     "delete the mv that files the fork predecessor, leaving it to trip the orphan picker next launch" \

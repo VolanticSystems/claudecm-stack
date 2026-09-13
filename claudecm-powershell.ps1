@@ -457,11 +457,20 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
                     Set-Location $dir
                     $tmpFile = [System.IO.Path]::GetTempFileName()
                     $metaPrompt | Out-File -FilePath $tmpFile -Encoding UTF8
-                    $primerJson = Get-Content $tmpFile -Raw | & $claudeExe -p --output-format json --dangerously-skip-permissions 2>$null
+                    # --no-session-persistence: this is a throwaway call, and
+                    # without the flag it writes a transcript into the project's
+                    # own key dir, which ClaudeCM then sees as an orphan for ever
+                    # and raises the picker over. Cleaning up afterwards was the
+                    # old approach and it leaks: if the call dies or the JSON
+                    # does not parse, $primerSessionId is never read and the file
+                    # stays. Measured 2026-09-13: with the flag, `-p` still
+                    # returns result and session_id and writes no .jsonl at all.
+                    $primerJson = Get-Content $tmpFile -Raw | & $claudeExe -p --output-format json --no-session-persistence --dangerously-skip-permissions 2>$null
                     Remove-Item $tmpFile -ErrorAction SilentlyContinue
                     $primerData = $primerJson | ConvertFrom-Json
                     $recoveryPrompt = $primerData.result
-                    # Capture and clean up the throwaway JSONL the -p call created
+                    # Belt and braces: older builds, or a future regression, may
+                    # still write one. Deleting nothing costs nothing.
                     $primerSessionId = $primerData.session_id
                     if ($primerSessionId) {
                         $primerProjKey = Get-ProjectKey (Get-Location).Path
@@ -1034,6 +1043,38 @@ IMPORTANT:
         Write-Host ""
         if (-not $knownGuid) { return }
         $guid = $knownGuid
+        # ORDER MATTERS, and it is durable-state-first on purpose. Everything
+        # that must survive the console dying (registration, token count, MRU
+        # position, session index) happens BEFORE the snapshot spinner and
+        # before any question. the operator closes the PowerShell window at this point
+        # often enough that it has to be free to do so: the snapshot can take
+        # up to two minutes and the trim question waits on a human. Nothing
+        # after this line is allowed to hold state that has not been written.
+        Save-ExitState $guid
+        Save-ExitSnapshot $guid
+        $sessions = Get-Sessions
+        $curSession = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
+        # Show session size and anti-bloat options
+        $sizeDisplay = ""
+        if ($curSession) {
+            $info = Get-SessionInfo $curSession.Guid $curSession.Dir $curSession.Tokens
+            $sizeDisplay = "$($info.Size) ($($info.Tokens))"
+        }
+        if ($sizeDisplay) {
+            Write-Host ""
+            Write-Host "  Current session: $sizeDisplay"
+        }
+        Offer-Trim $guid
+        if ($script:trimNewGuid) { $guid = $script:trimNewGuid }
+        # Anti-bloat: refresh (deeper clean)
+        Write-Host ""
+        $doRefresh = Read-Host "  Create a new compacted session, built from a structured rebuild of this one? [y/N]"
+        if ($doRefresh -eq 'y') {
+            Do-Refresh $guid
+        }
+    }
+
+    function Save-ExitSnapshot($guid) {
         # Auto-snapshot with CMV (now that we have a guid, use -s instead of --latest).
         # Failure of the snapshot job is non-fatal: Do-PostExit's main purpose is
         # to update token counts and offer trim/refresh; snapshot is nice-to-have.
@@ -1068,55 +1109,90 @@ IMPORTANT:
                 Write-Host "  Snapshot setup error (non-fatal): $($_.Exception.Message)"
             }
         }
+    }
+
+    function Save-ExitState($guid) {
+        # Every write sessions.txt needs on exit, done before anything slow or
+        # interactive. An unregistered session is registered under the folder
+        # name FIRST and renamed afterwards if the operator answers, so closing
+        # the window at the prompt costs a name, never the session itself.
         $sessions = Get-Sessions
-        $existing = $sessions | Where-Object { $_.Guid -eq $guid }
-        if ($existing) {
-            # Update token count via cmv benchmark (use -s, never --latest)
-            if (Test-Path $cmvExe) {
-                $benchOut = & $cmvExe benchmark -s $guid --json 2>&1 | Out-String
-                $tokMatch = [regex]::Match($benchOut, '"preTrimTokens"\s*:\s*(\d+)')
-                if ($tokMatch.Success) { $existing.Tokens = $tokMatch.Groups[1].Value }
-            }
-            $sessions = @($existing) + @($sessions | Where-Object { $_.Guid -ne $guid })
-            Save-Sessions $sessions
-        } else {
-            Write-Host ""
+        # Select-Object -First 1: a duplicated guid must not turn $existing into
+        # an array, or Sync-SessionIndex is handed one and the row is doubled.
+        $existing = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
+        if (-not $existing) {
             $folderName = (Split-Path (Get-Location).Path -Leaf) -replace '-', ' '
             $folderName = (Get-Culture).TextInfo.ToTitleCase($folderName)
-            $desc = Read-Host "  Describe this session (Enter for '$folderName', 'skip' to skip)"
-            if ($desc -eq 'skip') { return }
-            if (-not $desc) { $desc = $folderName }
-            $newEntry = [PSCustomObject]@{ Guid=$guid; Dir=(Get-Location).Path; Desc=$desc; Tokens='' }
-            $sessions = @($newEntry) + @($sessions)
-            Save-Sessions $sessions
-        }
-        # Sync session index for Claude's /resume picker
-        $sessions = Get-Sessions
-        $curSession = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
-        if ($curSession) { Sync-SessionIndex $curSession.Dir }
-
-        # Show session size and anti-bloat options
-        $sizeDisplay = ""
-        if ($curSession) {
-            $info = Get-SessionInfo $curSession.Guid $curSession.Dir $curSession.Tokens
-            $sizeDisplay = "$($info.Size) ($($info.Tokens))"
-        }
-        if ($sizeDisplay) {
+            $existing = [PSCustomObject]@{ Guid=$guid; Dir=(Get-Location).Path; Desc=$folderName; Tokens='' }
+            Save-Sessions (@($existing) + @($sessions))
             Write-Host ""
-            Write-Host "  Current session: $sizeDisplay"
+            $desc = Read-Host "  Describe this session (Enter for '$folderName', 'skip' to skip)"
+            if ($desc -eq 'skip') {
+                # An explicit skip still means skip: take the row back out.
+                # Only an ANSWERED skip does that, never a closed window.
+                Save-Sessions @(Get-Sessions | Where-Object { $_.Guid -ne $guid })
+                return
+            }
+            if ($desc) {
+                $sessions = Get-Sessions
+                foreach ($s in $sessions) { if ($s.Guid -eq $guid) { $s.Desc = $desc } }
+                Save-Sessions $sessions
+            }
+            $sessions = Get-Sessions
+            $existing = $sessions | Where-Object { $_.Guid -eq $guid } | Select-Object -First 1
+        }
+        if (-not $existing) { return }
+        # MRU position first, because it costs one atomic write and no waiting.
+        # `cmv benchmark` takes a second or two on a large transcript, and that
+        # is a second or two in which the window can close, so nothing that
+        # matters is allowed to sit behind it.
+        $sessions = @($existing) + @($sessions | Where-Object { $_.Guid -ne $guid })
+        Save-Sessions $sessions
+        Sync-SessionIndex $existing.Dir
+        # Then the token count (use -s, never --latest). The rest of the report
+        # is kept for Offer-Trim, which reads it instead of paying for a second
+        # benchmark run.
+        $script:exitBench = $null
+        if (Test-Path $cmvExe) {
+            $benchOut = & $cmvExe benchmark -s $guid --json 2>&1 | Out-String
+            $tokMatch = [regex]::Match($benchOut, '"preTrimTokens"\s*:\s*(\d+)')
+            if ($tokMatch.Success) {
+                $sessions = Get-Sessions
+                foreach ($s in $sessions) { if ($s.Guid -eq $guid) { $s.Tokens = $tokMatch.Groups[1].Value } }
+                Save-Sessions $sessions
+            }
+            try { $script:exitBench = $benchOut | ConvertFrom-Json } catch { $script:exitBench = $null }
+        }
+    }
+
+    function Offer-Trim($guid) {
+        # Do NOT ask a question whose answer is always no. CMV's auto-trim hooks
+        # (PostToolUse + PreCompact) stub oversized tool results in place all
+        # session long, so by the time a session exits there is almost nothing
+        # left for `cmv trim` to take: measured 2026-09-13 across four live
+        # sessions, 2% to 5%. Worse, a trim starts a new session and throws away
+        # the prompt cache, so cmv's own projections were NEGATIVE at every
+        # horizon under 151 turns. Report the number, and only offer the trim
+        # when it is actually worth taking.
+        # Clear first: a stale value from an earlier exit in the same console
+        # would otherwise be read as "this trim produced a new guid".
+        $script:trimNewGuid = $null
+        $b = $script:exitBench
+        if ($b -and $null -ne $b.reductionPercent) {
+            $pct = [int]$b.reductionPercent
+            $be = if ($null -ne $b.breakEvenTurns) { [int]$b.breakEvenTurns } else { 0 }
+            if ($pct -lt 10) {
+                Write-Host ""
+                Write-Host ("  Trim would recover {0}% ({1} of {2} tokens); auto-trim has already taken the rest." -f $pct, ($b.preTrimTokens - $b.postTrimTokens), $b.preTrimTokens)
+                if ($be -gt 0) { Write-Host ("  It would not pay for the lost prompt cache for another {0} turns. Not offering it." -f $be) }
+                return
+            }
+            Write-Host ""
+            Write-Host ("  Trim would recover {0}%, breaking even after {1} turns." -f $pct, $be)
         }
         Write-Host ""
         $doTrim = Read-Host "  Trim this session? [y/N]"
-        if ($doTrim -eq 'y') {
-            Do-Trim $guid
-            if ($script:trimNewGuid) { $guid = $script:trimNewGuid }
-        }
-        # Anti-bloat: refresh (deeper clean)
-        Write-Host ""
-        $doRefresh = Read-Host "  Create a new compacted session, built from a structured rebuild of this one? [y/N]"
-        if ($doRefresh -eq 'y') {
-            Do-Refresh $guid
-        }
+        if ($doTrim -eq 'y') { Do-Trim $guid }
     }
 
     function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs, $rawDesc) {
@@ -1144,7 +1220,7 @@ IMPORTANT:
                 # only appended when non-empty (brand-new dirs have no 'before' set).
                 # Values are wrapped in escaped quotes: Start-Process -ArgumentList does
                 # not auto-quote array elements, so any value containing a space (session
-                # names, or project dirs like Trading Platform's) would otherwise be split apart.
+                # names, or project dirs with a space in them) would otherwise be split apart.
                 $spArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$lateHelper`"",
                     '-ProjDirClaude', "`"$projDirClaude`"", '-ProjectDir', "`"$projectDir`"",
                     '-Desc', "`"$rawDesc`"", '-SessionsFile', "`"$sessionsFile`"")

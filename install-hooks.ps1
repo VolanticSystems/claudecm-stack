@@ -40,6 +40,13 @@ param(
     # decision is reversible in one command. It is off by default so a routine
     # reinstall cannot quietly restore a gate the operator turned off.
     [switch]$WithWorkRecord,
+    # The edit judge (judge-edit.py), added 2026-09-12. Auto mode's classifier
+    # never reviews an Edit or Write inside the working directory, and that is
+    # the one thing the operator complains about. The judge hands a separate model his
+    # last five messages and the pending edit and asks whether his words
+    # directed it. Off by default for the same reason as the work record: a
+    # routine reinstall must not quietly switch a gate on or off.
+    [switch]$WithJudge,
     [string]$ClaudeDir,
     [string]$BackupPath
 )
@@ -56,7 +63,7 @@ $backup    = if ($BackupPath) { $BackupPath } else { Join-Path $env:USERPROFILE 
 
 $scripts = @('lib_agreement.py', 'guard-bash.py', 'guard-write.py', 'guard-tool.py',
              'lib_worklog.py', 'record-prompt.py', 'guard-worklog.py',
-             'guard-output.py')
+             'guard-output.py', 'judge-edit.py')
 
 $script:problems = @()
 function Fault([string]$m) { $script:problems += $m; Write-Output "  FAIL   $m" }
@@ -119,6 +126,20 @@ if (Test-Path $agreement) {
     Write-Output "  create $agreement with NO rules in force"
 }
 Write-Output "  add 3 PreToolUse entries to settings.json (Bash; Write/Edit; all tools)"
+if ($WithJudge) {
+    Write-Output "  add the EDIT JUDGE on Write/Edit (-WithJudge): a headless Haiku call on your subscription per judged edit"
+    # The judge runs `claude -p`; prove the CLI is on PATH and logged in, or the
+    # judge would fail open on every edit and protect nothing.
+    $probe = ''
+    try {
+        $env:MAX_THINKING_TOKENS = '0'
+        $probe = 'Reply with the single word OK.' | & claude -p --model haiku --tools '' --no-session-persistence --setting-sources '' --permission-mode dontAsk --exclude-dynamic-system-prompt-sections --system-prompt 'You reply with one word.' 2>&1 | Out-String
+    } catch { $probe = "$($_.Exception.Message)" }
+    if ($probe -match '\bOK\b') { Good "headless claude -p answers on this machine (the judge's route)" }
+    else { Fault "headless claude -p did not answer: $($probe.Trim().Substring(0, [Math]::Min(120, $probe.Trim().Length)))" }
+} else {
+    Write-Output "  the edit judge is NOT wired (pass -WithJudge to enable it)"
+}
 Write-Output "  existing hooks are preserved, including the cmv trimmer"
 
 if ($script:problems.Count -gt 0) {
@@ -154,7 +175,7 @@ Write-Output '4. Smoke testing the copies on this machine'
 # Prove each guard runs and allows a benign payload BEFORE wiring it in. A guard
 # that cannot start is the failure that wedges every session.
 $benign = '{"tool_name":"Bash","tool_input":{"command":"echo hello"}}'
-foreach ($s in @('guard-bash.py', 'guard-write.py', 'guard-tool.py')) {
+foreach ($s in @('guard-bash.py', 'guard-write.py', 'guard-tool.py', 'judge-edit.py')) {
     $p = Join-Path $dstHooks $s
     $out = $benign | & python $p 2>&1
     $rc = $LASTEXITCODE
@@ -198,6 +219,7 @@ $toolCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-tool.py"'
 $workCmd  = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-worklog.py"'
 $recCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/record-prompt.py"'
 $outCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-output.py"'
+$judgeCmd = 'python "' + ($dstHooks -replace '\\', '/') + '/judge-edit.py"'
 
 # Drop any previous copy of ours first, so re-running does not duplicate.
 #
@@ -208,7 +230,7 @@ $outCmd   = 'python "' + ($dstHooks -replace '\\', '/') + '/guard-output.py"'
 # Python process on every tool call in every session and grows without bound.
 # Retired names stay listed so a reinstall also cleans a machine that has them.
 $OURS = 'guard-bash\.py|guard-write\.py|guard-tool\.py|guard-worklog\.py|' +
-        'guard-authorization\.py|guard-scope\.py'
+        'judge-edit\.py|guard-authorization\.py|guard-scope\.py'
 $kept = @($json.hooks.PreToolUse | Where-Object {
     $entry = $_
     -not (@($entry.hooks) | Where-Object { $_.command -match $OURS })
@@ -231,6 +253,15 @@ $kept += [pscustomobject]@{
 if ($WithWorkRecord) {
     $kept += [pscustomobject]@{
         hooks   = @([pscustomobject]@{ type = 'command'; command = $workCmd; timeout = 15 })
+    }
+}
+# The edit judge, only when explicitly asked for. Timeout 35: three votes run
+# in parallel, each capped at 20s inside the script, median 3.8s and worst
+# measured 9.9s. A timed-out hook blocks the tool call, so this has room.
+if ($WithJudge) {
+    $kept += [pscustomobject]@{
+        matcher = 'Write|Edit|MultiEdit|NotebookEdit'
+        hooks   = @([pscustomobject]@{ type = 'command'; command = $judgeCmd; timeout = 35 })
     }
 }
 $json.hooks.PreToolUse = $kept
@@ -290,6 +321,13 @@ if (-not $reparsed) {
     } else {
         Good "guard-worklog is deactivated (pass -WithWorkRecord to restore)"
     }
+    if ($WithJudge) {
+        if ($after -match 'judge-edit\.py') { Good "judge-edit is wired (-WithJudge)" } else { Fault "judge-edit was requested but is not in the file" }
+    } elseif ($after -match 'judge-edit\.py') {
+        Fault "judge-edit is wired but was not requested; it is off by default"
+    } else {
+        Good "judge-edit is not wired (pass -WithJudge to enable)"
+    }
     if ($after -match 'record-prompt\.py') { Good "record-prompt is wired (UserPromptSubmit)" } else { Fault "record-prompt is not in the file" }
     if ($after -match 'guard-output\.py') { Good "guard-output is wired (Stop)" } else { Fault "guard-output is not in the file" }
     # Nothing may reference a script that is not on disk. That is the exact
@@ -302,7 +340,8 @@ if (-not $reparsed) {
     # No guard may be wired twice. A duplicate is not wrong, only wasteful, but
     # it grows by one on every reinstall and nothing else would ever report it.
     foreach ($g in @('guard-bash.py', 'guard-write.py', 'guard-tool.py',
-                     'guard-worklog.py', 'record-prompt.py', 'guard-output.py')) {
+                     'guard-worklog.py', 'record-prompt.py', 'guard-output.py',
+                     'judge-edit.py')) {
         $n = ([regex]::Matches($after, [regex]::Escape($g))).Count
         if ($n -gt 1) { Fault "$g is wired $n times; it should appear once" }
     }

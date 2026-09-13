@@ -516,8 +516,8 @@ Inputs: `guid`, `dir`, `desc`, `tokens`. Returns: `{ Action='normal'|'fresh'|'pr
      c. Print `  Generating recovery prompt (this may take a minute)...` in cyan.
      d. Build the meta-prompt (Section 11.7.1).
      e. Save current location, `cd` into `dir`.
-     f. Write meta-prompt to a temp file. Run `claude -p --output-format json --dangerously-skip-permissions` with the meta-prompt on stdin. Capture stdout. Delete temp file. Parse JSON. Extract `result` and `session_id`.
-     g. **Cleanup the throwaway -p session immediately.** The `-p` call created a real JSONL at `~/.claude/projects/<key>/<session_id>.jsonl`. Delete it AND any matching `<session_id>/` subdirectory. Run Sync-SessionIndex on the project. This is critical; without cleanup, every recovery generation leaves an orphan.
+     f. Write meta-prompt to a temp file. Run `claude -p --output-format json --no-session-persistence --dangerously-skip-permissions` with the meta-prompt on stdin. Capture stdout. Delete temp file. Parse JSON. Extract `result` and `session_id`. **`--no-session-persistence` is required.** Without it the call writes a transcript into the project's own key dir, which ClaudeCM sees as an orphan for ever and raises the picker over. Measured 2026-09-13: with the flag the call still returns `result` and `session_id` and writes no `.jsonl` at all.
+     g. **Cleanup the throwaway -p session, belt and braces.** Step f means there is normally nothing to delete. Keep the cleanup anyway for older builds and future regressions: if `~/.claude/projects/<key>/<session_id>.jsonl` exists, delete it AND any matching `<session_id>/` subdirectory, then run Sync-SessionIndex. Cleanup alone is NOT sufficient and must never be the only defence: it is skipped entirely when the call dies or the JSON does not parse, because `session_id` is never read, and that path leaks an orphan.
      h. If `result` is empty/missing, print `  Recovery prompt generation failed.` in red and return cancel.
      i. Write `result` to `<dir>/recovery-prompt.md` (UTF-8).
      j. Print success message in green and `  Edit it if you want, or just tell Claude to use it as the first message of the conversation.` in default + `  Opening a fresh Claude session in that directory now...` in cyan.
@@ -778,19 +778,15 @@ Runs after every interactive Claude session that exited cleanly. Argument: `know
 
 1. Print blank line, `  Session ended.`, blank line.
 2. **Resolve GUID.** Use `knownGuid`. If unset or empty, return immediately without running snapshot, token update, sync, or trim/refresh prompts. The prior fallback that scanned the project key dir for "newest non-agent-* JSONL" was removed: it picked stale pre-existing files when the caller legitimately had no new session (user bailed at claude splash, launch produced nothing), mis-registering the wrong session in sessions.txt. Callers that can't produce a GUID must skip Do-PostExit entirely rather than call it with null hoping the fallback saves them.
-3. **Auto-snapshot via CMV (using -s <guid>, never --latest).** Snapshot label = `auto-exit-<yyyyMMdd-HHmmss>`. Run `cmv snapshot <label> -s <guid>` in a background job with a spinner: `  - Saving snapshot...` rotating `- \ | /`. When done, replace with `  Done.`
-4. Look up entry in sessions.txt by GUID.
-5. **If found:**
-   - Update tokens via `cmv benchmark -s <guid> --json`, parse `preTrimTokens`.
-   - Move entry to top of sessions list. Save.
-6. **If not found:**
-   - Compute folder default (leaf of cwd, dashes → spaces, title-cased).
-   - Prompt: `  Describe this session (Enter for '<default>', 'skip' to skip): `
-   - `skip` → return without registering.
-   - Otherwise register at top of sessions.txt with empty tokens.
-7. Sync-SessionIndex on the entry's Dir.
+**DURABLE STATE FIRST.** Steps 3 to 7 run before the snapshot and before any question, because the operator closes the terminal at this point: the snapshot can take up to two minutes and the trim question waits on a human. Nothing after step 7 may hold state that has not been written. Split into `Save-ExitState` / `Save-ExitSnapshot` / `Offer-Trim` (bash: `__cm_save_exit_state`, `__cm_save_exit_snapshot`, `__cm_offer_exit_actions`) so the ordering is a property of the code, not of a comment.
+
+3. Look up entry in sessions.txt by GUID.
+4. **If not found:** compute the folder default (leaf of cwd, dashes → spaces, title-cased) and **register the row under that default FIRST**, then prompt `  Describe this session (Enter for '<default>', 'skip' to skip): `. A typed name renames the row; an ANSWERED `skip` removes it again; a closed window leaves the session registered under the default. Registering only after the answer meant a closed window lost the session entirely.
+5. Move the entry to the top of the sessions list and save, then Sync-SessionIndex on its Dir. This is one atomic write with no waiting, so it precedes anything that can block.
+6. **Then** update tokens via `cmv benchmark -s <guid> --json`, parse `preTrimTokens`, save again. Keep the whole JSON: step 9 reads it instead of paying for a second benchmark run.
+7. **Auto-snapshot via CMV (using -s <guid>, never --latest).** Snapshot label = `auto-exit-<yyyyMMdd-HHmmss>`. Run `cmv snapshot <label> -s <guid>` in a background job with a spinner: `  - Saving snapshot...` rotating `- \ | /`. When done, replace with `  Done.`
 8. Show session size: `  Current session: <size> (<tokens>)`.
-9. Prompt: `  Trim this session? [y/N]: `. If `y`, run Do-Trim. If trim returned a new GUID, update local `guid`.
+9. **Offer the trim only when the benchmark says it is worth taking.** CMV's auto-trim hooks (PostToolUse and PreCompact) stub oversized tool results in place throughout the session, so the exit-time trim recovers 2% to 5%: measured 2026-09-13 on four live sessions. A trim also starts a new session and discards the prompt cache, so cmv's own projections were negative at every horizon under `breakEvenTurns` (151 on the measured session). If `reductionPercent` < 10, print what it would recover and why it is not offered, and do not prompt. Otherwise print the percentage and the break-even, then prompt `  Trim this session? [y/N]: `. If `y`, run Do-Trim. If trim returned a new GUID, update local `guid`.
 10. Prompt: `  Create a new compacted session, built from a structured rebuild of this one? [y/N]: `. If `y`, run Do-Refresh.
 
 ---
@@ -936,7 +932,7 @@ It is deliberately `$null` at the other two call sites (recovery→fresh swap-in
 
 **Windows-specific gotchas hit during implementation — bash will need its own equivalents, not these exact bugs, but the same class of care:**
 1. `Start-Process -ArgumentList` (an array) rejects any element that is an empty string. The "before" GUID set is empty for exactly the brand-new-project case (nothing existed before launch) — the single most common trigger for this whole feature — so passing an always-present-but-sometimes-empty `-BeforeGuids ''` argument broke it on the primary path. Fixed by only appending that argument when non-empty.
-2. `Start-Process -ArgumentList` does not auto-quote array elements containing spaces; a session name like "Data Flow" or a project path like `%USERPROFILE%\Documents\Trading Platform 8\...` gets silently truncated to its first word at the child process's argv. Fixed by wrapping every free-text value in escaped double quotes before adding it to the array.
+2. `Start-Process -ArgumentList` does not auto-quote array elements containing spaces; a session name like "Data Flow" or a project path like `C:\Users\<you>\Documents\Trading Platform 8\...` gets silently truncated to its first word at the child process's argv. Fixed by wrapping every free-text value in escaped double quotes before adding it to the array.
 
 **Bash porting note.** Bash's equivalent of a detached, crash-surviving background process is typically `nohup ... &` combined with `disown`, or a double-fork. Whatever mechanism is used, it must independently re-verify: (a) the spawned process truly detaches from the parent shell's process group (test by killing the parent and confirming the child keeps running), (b) argument passing preserves spaces in session names and paths (bash generally handles this correctly with proper quoting, but verify empirically rather than assuming), and (c) the lock-and-recheck-before-write sequence uses the exact same lock file (`sessions.txt.lock`) and atomic-write pattern (`__cm_write_sessions_atomic` or equivalent) the rest of the bash script already uses, so this doesn't become a second, divergent write path.
 

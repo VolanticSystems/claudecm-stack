@@ -89,6 +89,20 @@ if (Test-Path $deployed) {
     Write-Output "  SKIP      no deployed copy at $deployed"
 }
 
+# The suggested-prompts switch. It used to live only in the deployed script,
+# where a raw copy of the repo file over it (2026-09-11) silently put the
+# suggestions back. It now lives in settings.json's env block, which no deploy
+# touches. This pins it there so the next deploy cannot lose it again.
+$settings = Join-Path $env:USERPROFILE '.claude\settings.json'
+if (Test-Path $settings) {
+    $val = $null
+    try { $val = (Get-Content $settings -Raw | ConvertFrom-Json).env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION } catch { }
+    Check 'settings.json env switches prompt suggestions OFF' ($val -eq '0') `
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION is '$val'; it must be '0' in the env block"
+} else {
+    Write-Output "  SKIP      no settings.json at $settings"
+}
+
 Write-Output ''
 Write-Output "$($pass + $fail) check(s): $pass pass, $fail fail"
 if ($fail) { exit 1 } else { exit 0 }

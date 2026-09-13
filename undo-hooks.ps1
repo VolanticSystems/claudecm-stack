@@ -48,6 +48,7 @@ $backupDir = Split-Path $backup
 # of these is ours and is removed; anything else is left alone.
 $guardScripts = @('guard-bash.py', 'guard-write.py', 'guard-tool.py',
                   'guard-worklog.py', 'record-prompt.py', 'guard-output.py',
+                  'judge-edit.py',
                   # Retired names, kept so an undo still cleans a machine that
                   # was installed before they were removed.
                   'guard-authorization.py', 'classify-prompt.py',

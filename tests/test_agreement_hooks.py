@@ -231,8 +231,8 @@ try:
         ("no-multiple-choice", "tool", "AskUserQuestion", "Read"),
         ("subagent-needs-ok", "tool", "Agent", "Agentic"),
         ("scratch-outside-project", "path",
-         r"%USERPROFILE%\AppData\Local\Temp\claude\x\scratchpad\notes.md",
-         r"%USERPROFILE%\Documents\GitHub\claudecm-stack\temp\notes.md"),
+         r"C:\Users\you\AppData\Local\Temp\claude\x\scratchpad\notes.md",
+         r"C:\Users\you\Documents\GitHub\claudecm-stack\temp\notes.md"),
     ]
 
     for slug, surface, positive, negative in cases:
@@ -474,7 +474,7 @@ try:
 
     rc, out, _ = run_hook(GUARD_TOOL, {
         "tool_name": "Write",
-        "tool_input": {"file_path": r"%USERPROFILE%\AppData\Local\Temp\claude\x\s.md"}}, pt)
+        "tool_input": {"file_path": r"C:\Users\you\AppData\Local\Temp\claude\x\s.md"}}, pt)
     check("a scratch path outside the project is caught", decision(out) == "ask", out[:200])
 
     # The anchors matter: ^TodoWrite$ must not catch a tool whose name merely

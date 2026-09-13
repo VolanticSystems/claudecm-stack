@@ -86,7 +86,7 @@ for tool, ti in [
     ("Grep", {"pattern": "x"}),
     ("Glob", {"pattern": "**/*.py"}),
     ("WebFetch", {"url": "https://example.com"}),
-    ("Bash", {"command": "ls -la $HOME"}),
+    ("Bash", {"command": "ls -la /c/Users/you"}),
     ("Bash", {"command": "cat somefile.txt"}),
     ("Bash", {"command": "grep -rn 'thing' ."}),
     ("Bash", {"command": "git status --short"}),
@@ -103,9 +103,9 @@ print("")
 
 fresh()
 for tool, ti in [
-    ("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"}),
-    ("Edit", {"file_path": "%USERPROFILE%/thing.md", "old_string": "a", "new_string": "b"}),
-    ("Bash", {"command": "rm -rf %USERPROFILE%/something"}),
+    ("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"}),
+    ("Edit", {"file_path": "C:/Users/you/thing.md", "old_string": "a", "new_string": "b"}),
+    ("Bash", {"command": "rm -rf C:/Users/you/something"}),
     ("Bash", {"command": "git commit -F msg.txt"}),
     ("Bash", {"command": "git push origin master"}),
     ("Bash", {"command": "echo hello > out.txt"}),
@@ -125,7 +125,7 @@ print("")
 # the guard built to avoid it. Three spellings of discard, one per shell.
 fresh()
 for cmd in [
-    "ls -la $HOME/.claude/hooks/state/ 2>/dev/null",
+    "ls -la /c/Users/you/.claude/hooks/state/ 2>/dev/null",
     "cat payload.json 2>/dev/null",
     "grep -rn thing . 2>/dev/null",
     "git status --short 2>&1",
@@ -210,7 +210,7 @@ print("")
 fresh()
 said("Fix your output surface.")
 lib_worklog.open_task("build the output guard", "Fix your output surface")
-got, _ = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, _ = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("with a task open, a write is allowed", got == "allow", got)
 
 print("")
@@ -223,7 +223,7 @@ check("writing the task file itself is exempt (bootstrap)", got == "allow", got)
 got, _ = call("Write", {"file_path": os.path.join(REPO, "temp", "scratch.py"),
                         "content": "x"})
 check("scratch in the project temp is exempt", got == "allow", got)
-got, _ = call("Write", {"file_path": "%USERPROFILE%/.claude/CLAUDE.md", "content": "x"})
+got, _ = call("Write", {"file_path": "C:/Users/you/.claude/CLAUDE.md", "content": "x"})
 check("but a real file is still gated", got == "deny", got)
 
 print("")
@@ -244,7 +244,7 @@ check("and the licence I was claiming at the time",
 check("the task is closed, so the next change needs a fresh citation",
       lib_worklog.current_task() is None)
 
-got, _ = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, _ = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("and a state change is refused again", got == "deny", got)
 
 print("")
@@ -261,7 +261,7 @@ io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
     json.dumps({"what": "do whatever I like",
                 "citation": "Permission to rewrite the whole system",
                 "opened_at": time.time()}))
-got, out = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, out = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("a hand-written task with an invented citation is refused",
       got == "deny", got)
 check("and the refusal quotes the bogus citation",
@@ -271,7 +271,7 @@ io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
     json.dumps({"what": "finish the backup script",
                 "citation": "Go and finish the backup script",
                 "opened_at": time.time()}))
-got, _ = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, _ = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("the same file with a real quote is honoured", got == "allow", got)
 
 print("")
@@ -329,7 +329,7 @@ def call_as(session, tool, tool_input):
         return "unparseable"
 
 
-w = {"file_path": "%USERPROFILE%/thing.md", "content": "x"}
+w = {"file_path": "C:/Users/you/thing.md", "content": "x"}
 check("the owning session may change state", call_as("alpha", "Write", w) == "allow")
 check("another session may NOT", call_as("beta", "Write", w) == "deny")
 
@@ -522,7 +522,7 @@ said("Go and do the thing I asked about.")
 io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8", newline="\n").write(
     json.dumps({"what": "something", "citation": "words he never said at all",
                 "opened_at": time.time()}))
-got, out = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, out = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("an unmatched citation still refuses", got == "deny", got)
 check("but the refusal names the file to delete",
       "current-task.json" in out, out[:400])
@@ -542,7 +542,7 @@ check("no state directory at all: reads allowed", got == "allow", got)
 fresh()
 with io.open(lib_worklog.TASK_FILE, "w", encoding="utf-8") as fh:
     fh.write("{ not json")
-got, _ = call("Write", {"file_path": "%USERPROFILE%/thing.md", "content": "x"})
+got, _ = call("Write", {"file_path": "C:/Users/you/thing.md", "content": "x"})
 check("a corrupt task file refuses rather than crashing", got == "deny", got)
 
 fresh()

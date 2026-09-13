@@ -15,7 +15,7 @@ back. That is the whole mechanism.
 | `slug` | short stable name. Quoted back at Claude when the rule fires. Names, not numbers, because numbers get renumbered and every citation breaks. |
 | `surface` | `bash` a shell command, `write` the content of a file, `path` where a write is going, `tool` the tool's own name, `output` Claude's prose. Comma-separate for several. |
 | `pattern` | a regular expression, matched case-insensitively. Backticks around it are optional and stripped. |
-| `action` | `deny` refuses it. `warn` allows it and says so. `ask` is a trap under bypass: see the note below. |
+| `action` | `deny` refuses it. `warn` allows it and says so. `ask` prompts, and blocks in every mode; never use it on a headless path. |
 | `why` | shown to Claude when it fires. Write the reason, not the rule number. This is the teaching. |
 
 ## The dial
@@ -23,6 +23,14 @@ back. That is the whole mechanism.
 The line below sets how much of the agreement is live. Change the word.
 
 <!-- AGREEMENT-MODE: full -->
+<!-- JUDGE-MODE: warn -->
+
+The second line is the edit judge's own dial, separate from the rules table.
+`warn` judges every edit, writes what it would have refused to
+`hooks/worklog/judge-log.md` with your words beside it, and refuses nothing.
+`deny` refuses. Start on warn, read the log, change the word. A typo falls to
+warn, the direction that cannot block anyone. `CLAUDE_JUDGE_MODE` overrides it
+for one session.
 
 | mode | what fires |
 |---|---|
@@ -57,21 +65,37 @@ whether work was authorised.
 The two headless `-p` launches keep bypass, because nobody is there to answer if
 the classifier holds something.
 
-## `ask` does not work under bypass. Use `deny` or `warn`.
+**One gap the classifier leaves, and the edit judge that fills it.** Added
+2026-09-12. The classifier never reviews an Edit or Write inside the working
+directory; those are auto-approved before it is consulted. That is exactly
+"read the bug report, then fix the bug". `judge-edit.py`, installed with
+`install-hooks.ps1 -WithJudge`, hands a separate model (Haiku, headless on the
+subscription, so nothing leaves the provider that already has every message)
+the operator's last five messages and the pending edit and asks whether his words
+directed it. It reads no rule from this table; the only thing here it honours
+is the dial: `off` switches it off along with everything else. It fails open,
+ignores subagents and the memory directory, and records every call in
+`hooks/worklog/judge-costs.jsonl`.
 
-Measured 2026-09-10, both directions. In an **interactive** session launched
-with `--dangerously-skip-permissions`, which is every session ClaudeCM starts,
-a hook returning `ask` is treated as **allow**: the tool runs and nobody is
-prompted. In a **headless** `claude -p` session under the same flag, the same
-`ask` **hard-blocks** with no way to approve.
+## `ask` blocks in every mode. Corrected 2026-09-13.
 
-So `ask` is not a gate. It is silently nothing in an interactive bypass session
-and an unapprovable wall in a scripted one. A rule written as `ask` in the
-belief it produces a prompt is providing no protection at all.
+**The 2026-09-10 measurement below was wrong and is kept only so nobody
+re-derives it.** It said a hook returning `ask` was treated as allow in an
+interactive `--dangerously-skip-permissions` session, so `ask` was no gate at
+all. Re-measured 2026-09-13 on 2.1.269: **`ask` blocks in every mode, bypass
+included.** It is a real gate.
 
-**Use `deny` for anything that must be stopped**, and lift it by moving the row
-below the END marker. Use `warn` when a note is enough. `ask` behaves correctly
-only in a normal, non-bypass session, which is what a bare `claude` gives you.
+Two things changed underneath that first reading. ClaudeCM no longer launches
+with bypass at all; since 2026-09-11 interactive sessions start in
+`--permission-mode auto`, so the bypass case is no longer the normal one. And
+the original test could not distinguish "allowed" from "blocked with nothing
+rendered", which is the shape of a measurement that needs a control.
+
+**Use `deny` for anything that must be stopped** and lift it by moving the row
+below the END marker. Use `warn` when a note is enough. `ask` is now usable
+where a human decision is genuinely wanted, with one caveat that still holds:
+in a **headless** `claude -p` session there is nobody to answer, so `ask` is an
+unapprovable wall there. Never put `ask` on a path a script takes.
 
 **Test a rule before you trust it**, without needing a session:
 

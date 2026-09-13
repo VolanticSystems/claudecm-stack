@@ -868,7 +868,12 @@ __cm_resolve_resume_or_recover() {
             local claude_exe; claude_exe=$(__cm_resolve_claude)
             local primer_json=""
             if [[ -n "$claude_exe" ]]; then
-                primer_json=$("$claude_exe" -p --output-format json --dangerously-skip-permissions < "$tmp_file" 2>/dev/null)
+                # --no-session-persistence: throwaway call. Without it this
+                # writes a transcript into the project's own key dir that
+                # ClaudeCM then treats as an orphan for ever. The cleanup below
+                # is belt and braces: it never runs when the call dies or the
+                # JSON does not parse, because primer_sid is never read.
+                primer_json=$("$claude_exe" -p --output-format json --no-session-persistence --dangerously-skip-permissions < "$tmp_file" 2>/dev/null)
             fi
             rm -f "$tmp_file"
             local recovery_prompt primer_sid
@@ -1214,6 +1219,18 @@ __cm_do_post_exit() {
         [[ -z "$newest" ]] && return 0
         guid=$(basename "$newest" .jsonl)
     fi
+    # ORDER MATTERS, and it is durable-state-first on purpose. Everything that
+    # must survive the terminal dying (registration, token count, MRU position,
+    # session index) happens BEFORE the snapshot spinner and before any
+    # question. The snapshot can run for a long time and the trim question waits
+    # on a human; neither may hold state that has not been written.
+    __cm_save_exit_state "$guid"
+    __cm_save_exit_snapshot "$guid"
+    __cm_offer_exit_actions "$guid"
+}
+
+__cm_save_exit_snapshot() {
+    local guid="$1"
     # Auto-snapshot via cmv (always -s <guid>, never --latest).
     local cmv_exe; cmv_exe=$(__cm_resolve_cmv || true)
     if [[ -n "$cmv_exe" ]]; then
@@ -1230,6 +1247,11 @@ __cm_do_post_exit() {
         kill "$spin_pid" 2>/dev/null; wait "$spin_pid" 2>/dev/null
         printf '\r  Done.                        \n'
     fi
+}
+
+__cm_save_exit_state() {
+    local guid="$1"
+    local cmv_exe; cmv_exe=$(__cm_resolve_cmv || true)
     # Locate entry; update tokens or register new.
     local sessions=() s
     mapfile -t sessions < <(__cm_get_sessions)
@@ -1239,36 +1261,53 @@ __cm_do_post_exit() {
         [[ "$g" == "$guid" ]] && { found_idx=$i; break; }
         i=$((i+1))
     done
-    if (( found_idx >= 0 )); then
-        local g d desc t; IFS='|' read -r g d desc t <<< "${sessions[found_idx]}"
-        if [[ -n "$cmv_exe" ]]; then
-            local bo; bo=$("$cmv_exe" benchmark -s "$guid" --json 2>&1)
-            local new_tokens; new_tokens=$(printf '%s' "$bo" | grep -oE '"preTrimTokens"[[:space:]]*:[[:space:]]*[0-9]+' | head -1 | grep -oE '[0-9]+$')
-            [[ -n "$new_tokens" ]] && t="$new_tokens"
-        fi
-        local top="$g|$d|$desc|$t"
-        local rest=() j
-        for (( j=0; j<${#sessions[@]}; j++ )); do (( j != found_idx )) && rest+=("${sessions[j]}"); done
-        __cm_save_sessions "$top" "${rest[@]}"
-    else
+    if (( found_idx < 0 )); then
+        # Register under the folder name FIRST and rename afterwards if the
+        # operator answers, so closing the terminal at the prompt costs a name,
+        # never the session itself. Only an ANSWERED skip removes the row.
         __cm_blank
         local folder; folder=$(basename "$(pwd)")
         folder="${folder//-/ }"
         # Title case (POSIX sh-friendly-ish)
         folder=$(printf '%s' "$folder" | awk '{for(i=1;i<=NF;i++)$i=toupper(substr($i,1,1)) tolower(substr($i,2)); print}')
+        __cm_save_sessions "$guid|$(pwd)|$folder|" "${sessions[@]}"
         local desc
         printf "  Describe this session (Enter for '$folder', 'skip' to skip): "; read -r desc
-        [[ "$desc" == "skip" ]] && return
+        mapfile -t sessions < <(__cm_get_sessions)
+        local keep=() k
+        for k in "${sessions[@]}"; do
+            local kg; IFS='|' read -r kg _ _ _ <<< "$k"
+            [[ "$kg" == "$guid" ]] || keep+=("$k")
+        done
+        if [[ "$desc" == "skip" ]]; then __cm_save_sessions "${keep[@]}"; return 0; fi
         [[ -z "$desc" ]] && desc="$folder"
-        local new_entry="$guid|$(pwd)|$desc|"
-        __cm_save_sessions "$new_entry" "${sessions[@]}"
+        __cm_save_sessions "$guid|$(pwd)|$desc|" "${keep[@]}"
+        found_idx=0
+        mapfile -t sessions < <(__cm_get_sessions)
     fi
-    # Sync session index.
+    # MRU position first, because it costs one atomic write and no waiting.
+    # `cmv benchmark` takes a second or two on a large transcript, and that is a
+    # second or two in which the terminal can close.
+    local g d desc t; IFS='|' read -r g d desc t <<< "${sessions[found_idx]}"
+    local rest=() j
+    for (( j=0; j<${#sessions[@]}; j++ )); do (( j != found_idx )) && rest+=("${sessions[j]}"); done
+    __cm_save_sessions "$g|$d|$desc|$t" "${rest[@]}"
+    __cm_sync_session_index "$d"
+    # Then the token count, and keep the rest of the report for the trim offer.
+    __cm_exit_bench=""
+    if [[ -n "$cmv_exe" ]]; then
+        __cm_exit_bench=$("$cmv_exe" benchmark -s "$guid" --json 2>&1)
+        local new_tokens; new_tokens=$(printf '%s' "$__cm_exit_bench" | grep -oE '"preTrimTokens"[[:space:]]*:[[:space:]]*[0-9]+' | head -1 | grep -oE '[0-9]+$')
+        if [[ -n "$new_tokens" ]]; then
+            __cm_save_sessions "$g|$d|$desc|$new_tokens" "${rest[@]}"
+        fi
+    fi
+}
+
+__cm_offer_exit_actions() {
+    local guid="$1"
+    local sessions=() s
     mapfile -t sessions < <(__cm_get_sessions)
-    for s in "${sessions[@]}"; do
-        local g d _desc _t; IFS='|' read -r g d _desc _t <<< "$s"
-        [[ "$g" == "$guid" ]] && { __cm_sync_session_index "$d"; break; }
-    done
     # Show size + token summary.
     local cur_s=""
     for s in "${sessions[@]}"; do
@@ -1281,11 +1320,31 @@ __cm_do_post_exit() {
         __cm_blank
         __cm_say "Current session: $__cm_info_size ($__cm_info_tokens)"
     fi
-    echo ""
-    local do_trim; printf '  Trim this session? [y/N]: '; read -r do_trim
-    if [[ "$do_trim" == "y" || "$do_trim" == "Y" ]]; then
-        __cm_do_trim "$guid"
-        [[ -n "$__cm_trim_new_guid" ]] && guid="$__cm_trim_new_guid"
+    # Do NOT ask a question whose answer is always no. CMV's auto-trim hooks
+    # stub oversized tool results in place all session long, so by the time a
+    # session exits there is almost nothing left for `cmv trim` to take:
+    # measured 2026-09-13 across four live sessions, 2% to 5%. A trim also
+    # starts a new session and throws away the prompt cache, so cmv's own
+    # projections were NEGATIVE at every horizon under 151 turns. Report the
+    # number, and only offer the trim when it is worth taking.
+    __cm_trim_new_guid=""
+    local pct="" be=""
+    if [[ -n "$__cm_exit_bench" ]]; then
+        pct=$(printf '%s' "$__cm_exit_bench" | grep -oE '"reductionPercent"[[:space:]]*:[[:space:]]*-?[0-9]+' | head -1 | grep -oE '\-?[0-9]+$')
+        be=$(printf '%s' "$__cm_exit_bench" | grep -oE '"breakEvenTurns"[[:space:]]*:[[:space:]]*-?[0-9]+' | head -1 | grep -oE '\-?[0-9]+$')
+    fi
+    if [[ -n "$pct" ]] && (( pct < 10 )); then
+        __cm_blank
+        __cm_say "Trim would recover ${pct}%; auto-trim has already taken the rest."
+        [[ -n "$be" ]] && (( be > 0 )) && __cm_say "It would not pay for the lost prompt cache for another ${be} turns. Not offering it."
+    else
+        [[ -n "$pct" ]] && { __cm_blank; __cm_say "Trim would recover ${pct}%, breaking even after ${be:-?} turns."; }
+        echo ""
+        local do_trim; printf '  Trim this session? [y/N]: '; read -r do_trim
+        if [[ "$do_trim" == "y" || "$do_trim" == "Y" ]]; then
+            __cm_do_trim "$guid"
+            [[ -n "$__cm_trim_new_guid" ]] && guid="$__cm_trim_new_guid"
+        fi
     fi
     echo ""
     local do_refresh; printf '  Create a new compacted session, built from a structured rebuild of this one? [y/N]: '; read -r do_refresh

@@ -71,8 +71,10 @@ CHECKS = [
     ("notify.ps1 path", ["notify.ps1"]),
     ("notify needs single quotes", ["single quotes"]),
     ("no Notification hook", ["notification hook"]),
-    ("email mailbox", ["claude@"]),
-    ("email recipient", ["you@"]),
+    # Needles here are deliberately generic. This file is public; the rule text
+    # it checks is not. Assert that the rule survives, never quote the address.
+    ("email mailbox", ["claude-email"]),
+    ("email recipient", ["names another"]),
     ("email config file", ["config.toml"]),
     ("local git repos path", ["gitrepos"]),
     ("compact command one line", ["one continuous line"]),
@@ -80,7 +82,7 @@ CHECKS = [
     ("chrome tab cleanup", ["tabs_close_mcp"]),
     ("chrome collapsed group chips", ["collapsed"]),
     ("CSHARP.md pointer", ["csharp.md"]),
-    ("Trading Platform caveat", ["trading platform"]),
+    ("platform-specific C# caveat", ["own section"]),
     ("confidence rating", ["confidence"]),
 ]
 
