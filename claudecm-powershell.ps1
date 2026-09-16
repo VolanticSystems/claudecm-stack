@@ -14,6 +14,13 @@
     # does $backupDir mean here" depended on which function you were reading.
     # bash has always had these as two variables; this matches it.
     $quarantineRoot = "$env:USERPROFILE\documents\github\claude-conversation-backup"
+    # Dangerous mode is OFF at the start of every run and is never persisted.
+    # Set here rather than only inside the D handler so Show-List can read it
+    # before anything has toggled it. See Get-PermissionArgs.
+    $script:launchBypass = $false
+    # Talk mode, the mirror of dangerous mode, same rules: off at the start of
+    # every run, never persisted, readable by Show-List before anything toggles.
+    $script:launchPlan = $false
     $claudeExe = "$env:USERPROFILE\.local\bin\claude.exe"
     $cmvExe = "$env:APPDATA\npm\cmv.cmd"
     $env:CLAUDE_CODE_REMOTE_SEND_KEEPALIVES = "1"
@@ -532,6 +539,16 @@ Read these in order. Do not run builds, tests, or git commands yet. Do not modif
         Write-Host "  E. Edit this list"
         if ($archivedCount -gt 0) { Write-Host "  V. View archived ($archivedCount)" }
         Write-Host "  M. Machine name ($machineName)"
+        if ($script:launchBypass) {
+            Write-Host "  D. DANGEROUS MODE IS ON: no classifier, no plan mode, no prompts" -ForegroundColor Yellow
+        } else {
+            Write-Host "  D. Dangerous mode off (press D to launch with all permission checks skipped)"
+        }
+        if ($script:launchPlan) {
+            Write-Host "  T. TALK MODE IS ON: launches in plan mode, no file changes" -ForegroundColor Cyan
+        } else {
+            Write-Host "  T. Talk mode off (press T to launch in plan mode for a discussion)"
+        }
     }
 
     function Do-OrphanScan($scanDir, $registeredGuid) {
@@ -1195,6 +1212,83 @@ IMPORTANT:
         if ($doTrim -eq 'y') { Do-Trim $guid }
     }
 
+    function Toggle-TalkMode {
+        # The mirror of Toggle-DangerousMode. Same shape on purpose: one
+        # script-scoped flag, per run, never written to disk, shared by every
+        # entry point so it cannot be present at one prompt and missing at the
+        # other, which is how D shipped broken the first time.
+        $script:launchPlan = -not $script:launchPlan
+        if ($script:launchPlan) { $script:launchBypass = $false }
+        Write-Host ""
+        if ($script:launchPlan) {
+            Write-Host "  Talk mode ON. Launches start in plan mode: Claude can read and" -ForegroundColor Cyan
+            Write-Host "  answer, and cannot change files until you leave plan mode." -ForegroundColor Cyan
+            Write-Host "  Leaving it is one-way and deliberate. Lasts until you quit claudecm."
+        } else {
+            Write-Host "  Talk mode OFF. Launches start in auto again." -ForegroundColor Green
+        }
+    }
+
+    function Toggle-DangerousMode {
+        # Shared by every entry point, because the first version lived in one
+        # of the two "Pick a session" prompts and the operator hit the other.
+        $script:launchBypass = -not $script:launchBypass
+        if ($script:launchBypass) { $script:launchPlan = $false }
+        Write-Host ""
+        if ($script:launchBypass) {
+            Write-Host "  Dangerous mode ON. Launches will skip ALL permission checks:" -ForegroundColor Yellow
+            Write-Host "  no auto-mode classifier, no plan mode, no prompts." -ForegroundColor Yellow
+            Write-Host "  This lasts until you quit claudecm. It is never saved to disk."
+        } else {
+            Write-Host "  Dangerous mode OFF. Launches start in auto again." -ForegroundColor Green
+        }
+    }
+
+    function Get-PermissionArgs {
+        # THE ONE DECISION POINT for how an interactive session starts, so the
+        # answer cannot drift between the four launch sites.
+        #
+        #   normal   --allow-dangerously-skip-permissions --permission-mode auto
+        #            Starts in auto. The second flag turns nothing on; it only
+        #            makes bypass reachable from the in-session mode cycle.
+        #   D chosen --dangerously-skip-permissions
+        #            Auto is not merely overridden, it is absent from the
+        #            command line. No classifier, no plan mode, no prompts.
+        #
+        # $script:launchBypass is per RUN of claudecm and is never written to
+        # disk. Quitting and starting claudecm again puts it back to normal, so
+        # it cannot silently become the default on every project next week.
+        #
+        # Splatting is safe for THESE values and only these: spec 11.6 forbids
+        # splatting free text because PowerShell 5.1 mangles arguments
+        # containing spaces. Permission flags contain none. The display name,
+        # which does contain spaces, stays positional.
+        # EVERY FLAG AND EVERY VALUE IS ITS OWN ELEMENT. Splatting passes one
+        # array element as one argv entry, so '--permission-mode auto' in a
+        # single string arrives as the literal option "--permission-mode auto"
+        # and claude exits with "unknown option". That shipped on 2026-09-14
+        # and broke every resume until it was found.
+        # `return ,@(...)` NOT `return @(...)`. PowerShell unwraps a
+        # single-element array on return, so the one-flag branch came back as a
+        # bare STRING, and splatting a string enumerates its characters: claude
+        # received `-`, `-`, `d`, `a`, `n`, ... as 31 separate arguments,
+        # ignored them, and started in its default mode. Dangerous mode looked
+        # like it did nothing. The three-element branch never showed the fault
+        # because an array of three survives the unwrap. Same defect class as
+        # spec 14.3 and Get-Sessions; the comma operator is the fix there too.
+        #   T chosen --permission-mode plan
+        #            The mirror of D: a session for talking rather than doing.
+        #            Plan mode is a ONE-WAY DOOR, and that is deliberate here.
+        #            A hook cannot put a session back into it
+        #            (anthropics/claude-code#14044), so leaving it is a thing
+        #            the operator does on purpose rather than something that
+        #            drifts. D wins if both are somehow set, because the more
+        #            permissive choice is the one he made most recently.
+        if ($script:launchBypass) { return ,@('--dangerously-skip-permissions') }
+        if ($script:launchPlan)   { return ,@('--permission-mode', 'plan') }
+        return ,@('--allow-dangerously-skip-permissions', '--permission-mode', 'auto')
+    }
+
     function Invoke-FreshLaunchWithDetection($projectDir, $displayName, $passArgs, $rawDesc) {
         # Fresh launch (no --resume) with set-diff detection of the new session's GUID.
         # Sets $script:lastFreshExit and $script:lastFreshNewGuid. Same output-capture-safe
@@ -1256,10 +1350,22 @@ IMPORTANT:
         # INTERACTIVE ONLY. The two headless `-p` sites keep bypass: nobody is
         # there to answer if the classifier holds something, and each runs a
         # single scripted prompt, so the surface is small.
+        #
+        # --allow-dangerously-skip-permissions, added 2026-09-14. It does NOT
+        # turn bypass on; it makes bypass SELECTABLE from the in-session mode
+        # cycle, which it otherwise is not. The session still starts in auto.
+        # The need is real: the auto-mode classifier refuses non-edit actions
+        # mid-session and the refusal is sticky, and without this flag the only
+        # way out is to kill the session and relaunch with the bypass flag,
+        # which loses whatever was in flight. This is the escape hatch, chosen
+        # deliberately per session rather than applied to every session.
+        # @permFlags is SPLATTING (a variable), not @(...) which would pass the
+        # whole array as one argument. The difference is silent and total.
+        $permFlags = Get-PermissionArgs
         if ($passArgs -and $passArgs.Count -gt 0) {
-            & $claudeExe --permission-mode auto -n $displayName @passArgs
+            & $claudeExe @permFlags -n $displayName @passArgs
         } else {
-            & $claudeExe --permission-mode auto -n $displayName
+            & $claudeExe @permFlags -n $displayName
         }
         $exitCode = $LASTEXITCODE
         $newGuid = $null
@@ -1316,8 +1422,9 @@ IMPORTANT:
         }
         Write-Host ""
         Write-Host ""
-        # Auto, not bypass. See the note at the new-session launch above.
-        & $claudeExe --permission-mode auto --resume $originalGuid -n $displayName
+        # Auto unless D was chosen. See the note at the new-session launch above.
+        $permFlags = Get-PermissionArgs
+        & $claudeExe @permFlags --resume $originalGuid -n $displayName
         $exitCode = $LASTEXITCODE
         $effectiveGuid = $originalGuid
         # Retry-with-prompt recovery. Claude Code's --resume scans the JSONL tail
@@ -1331,7 +1438,7 @@ IMPORTANT:
             Write-Host "  The conversation is intact; Claude just needs an initial prompt to pick up."
             $retryAns = Read-Host "  Would you like to retry with a prompt that says `"please continue`"? [Y/n]"
             if ($retryAns -ne 'n' -and $retryAns -ne 'N') {
-                & $claudeExe --permission-mode auto --resume $originalGuid -n $displayName "please continue"
+                & $claudeExe @permFlags --resume $originalGuid -n $displayName "please continue"
                 $exitCode = $LASTEXITCODE
             }
         }
@@ -1445,6 +1552,27 @@ IMPORTANT:
     # --- Main ---
     $firstArg = $args[0]
 
+    # Dangerous mode as a command-line verb, consumed here so it never reaches
+    # claude. Without this, `claudecm -D` fell through to the pass-through path
+    # and claude read it as its own -d/--debug flag, which is what "debug mode
+    # enabled" was. Consuming it means `--debug` is still the way to ask claude
+    # for debug output; the short form now belongs to claudecm.
+    # After the shift, dispatch continues exactly as if the verb was not typed,
+    # so `claudecm -D` lands in the session list and `claudecm -D 5` resumes 5.
+    if ($firstArg -match '^-{0,2}[dD]$') {
+        Toggle-DangerousMode
+        $args = @($args | Select-Object -Skip 1)
+        $firstArg = $args[0]
+    }
+
+    # Talk mode as a command-line verb, consumed here for the same reason: a
+    # bare -t must not reach claude, which has its own meaning for short flags.
+    if ($firstArg -match '^-{0,2}[tT]$') {
+        Toggle-TalkMode
+        $args = @($args | Select-Object -Skip 1)
+        $firstArg = $args[0]
+    }
+
     # Search mode: show only the sessions whose name contains <text>.
     # The list has outgrown one screen, so this is how you find one without
     # scrolling. Numbers shown are positions in the FILTERED list.
@@ -1494,6 +1622,16 @@ IMPORTANT:
             Write-Host ("  {0} of {1} sessions matching '{2}'" -f $hits.Count, $allSessions.Count, $term)
             $pick = Read-Host "  Pick a session (Enter to quit)"
             if (-not $pick -or $pick -eq 'q' -or $pick -eq 'Q') { return }
+            # Search mode gets D too. It did not, which is half of why the
+            # feature looked broken: the same prompt text, two code paths.
+            if ($pick -match '^-{0,2}[dD]\w*\.?\s*(\d*)$') {
+                Toggle-DangerousMode
+                if ($Matches[1]) { $pick = $Matches[1] } else { continue }
+            }
+            if ($pick -match '^-{0,2}[tT]\w*\.?\s*(\d*)$') {
+                Toggle-TalkMode
+                if ($Matches[1]) { $pick = $Matches[1] } else { continue }
+            }
             if ($pick -match '^\d+$') {
                 # Do-Resume only INDEXES the array it is handed; every write
                 # path inside it re-reads state with Get-Sessions. Passing the
@@ -1529,6 +1667,26 @@ IMPORTANT:
             }
             if ($pick -eq 'v' -or $pick -eq 'V') {
                 Do-ViewArchived
+                continue
+            }
+            # D toggles dangerous mode for the rest of THIS run of claudecm.
+            # `D 5` turns it on and resumes 5 in one step, which is the shape
+            # this exists for: one project needs it, the others do not.
+            if ($pick -match '^-{0,2}[dD]\w*\.?\s*(\d*)$') {
+                Toggle-DangerousMode
+                if ($Matches[1]) {
+                    Do-Resume ([int]$Matches[1]) $sessions
+                    return
+                }
+                continue
+            }
+            # T is the same shape for talk mode. `T 5` starts 5 in plan mode.
+            if ($pick -match '^-{0,2}[tT]\w*\.?\s*(\d*)$') {
+                Toggle-TalkMode
+                if ($Matches[1]) {
+                    Do-Resume ([int]$Matches[1]) $sessions
+                    return
+                }
                 continue
             }
             if ($pick -eq 'm' -or $pick -eq 'M') {

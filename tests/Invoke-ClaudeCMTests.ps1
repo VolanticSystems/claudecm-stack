@@ -354,7 +354,7 @@ Test-Case -Name 'sessions.txt ignores blank lines on read (spec 5)' `
 # =============================================================================
 
 Test-Case -Name 'new-session detection survives a non-zero exit (spec 14.4)' `
-    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Invoke-FreshLaunchWithDetection') `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-PermissionArgs','Invoke-FreshLaunchWithDetection') `
     -Sabotage 'gate the GUID assignment in Invoke-FreshLaunchWithDetection on $exitCode -eq 0, reintroducing the defect that made sessions vanish unless the user typed /exit' `
     -Mutate @{ 'Invoke-FreshLaunchWithDetection' = @{
         Find    = '$script:lastFreshNewGuid = $newGuid'
@@ -382,7 +382,7 @@ Test-Case -Name 'new-session detection survives a non-zero exit (spec 14.4)' `
     }
 
 Test-Case -Name 'new-session detection uses set-diff, not newest-mtime (spec 11.6.2)' `
-    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Invoke-FreshLaunchWithDetection') `
+    -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-PermissionArgs','Invoke-FreshLaunchWithDetection') `
     -Sabotage 'drop the "-not $before.ContainsKey" clause so every JSONL is a candidate and the newest wins, which is the newest-mtime strategy 11.6.2 exists to replace' `
     -Mutate @{ 'Invoke-FreshLaunchWithDetection' = @{
         Find    = 'Where-Object { $_.BaseName -match $uuidPattern -and -not $before.ContainsKey($_.BaseName) })'
@@ -648,7 +648,7 @@ Test-Case -Name 'Do-OrphanScan refuses to quarantine the registered session' `
 Test-Case -Name 'a forked resume follows the fork and files the predecessor (spec 11.6.1)' `
     -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
             'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
-            'Sync-SessionIndex','Test-CleanExitTail','Invoke-ResumeWithForkDetection') `
+            'Sync-SessionIndex','Test-CleanExitTail','Get-PermissionArgs','Invoke-ResumeWithForkDetection') `
     -Sabotage 'delete the Move-Item that files the fork predecessor, leaving it on disk to trip the orphan picker on the next launch' `
     -Mutate @{ 'Invoke-ResumeWithForkDetection' = @{
         Find    = 'Move-Item $predFile (Join-Path $destSubdir "$originalGuid.jsonl") -Force'
@@ -682,7 +682,7 @@ Test-Case -Name 'a forked resume follows the fork and files the predecessor (spe
 Test-Case -Name 'a resume that did NOT fork changes nothing (spec 11.6.1)' `
     -Uses @('Get-ProjectKey','Parse-SessionLine','Get-Sessions','Get-ArchivedSessions',
             'Acquire-SessionsLock','Release-SessionsLock','Write-SessionsAtomic','Save-Sessions',
-            'Sync-SessionIndex','Test-CleanExitTail','Invoke-ResumeWithForkDetection') `
+            'Sync-SessionIndex','Test-CleanExitTail','Get-PermissionArgs','Invoke-ResumeWithForkDetection') `
     -Sabotage 'treat the newest transcript as a fork unconditionally, so an ordinary resume files away the very session the user is using' `
     -Mutate @{ 'Invoke-ResumeWithForkDetection' = @{
         Find    = 'if ($newest -and $newest.BaseName -ne $originalGuid -and (-not $beforeNewest -or $newest.BaseName -ne $beforeNewest.BaseName)) {'
@@ -857,6 +857,49 @@ Test-Case -Name 'Offer-Trim does not ask when auto-trim has already taken everyt
             'a trim worth 40% must still be offered'
     }
 
+Test-Case -Name 'dangerous mode strips auto out entirely rather than overriding it' `
+    -Uses @('Get-PermissionArgs') `
+    -Sabotage 'join the flag and its value into one array element, the shape that shipped on 2026-09-14 and made claude exit with "unknown option" on every launch' `
+    -Mutate @{ 'Get-PermissionArgs' = @{
+        Find    = "return ,@('--allow-dangerously-skip-permissions', '--permission-mode', 'auto')"
+        Replace = "return ,@('--allow-dangerously-skip-permissions', '--permission-mode auto')" } } `
+    -Body {
+        # Two flags one word apart doing opposite things, so this asserts the
+        # exact strings rather than "contains bypass".
+        # NOT @(Get-PermissionArgs). The function returns a comma-wrapped array
+        # so a single-element result survives PowerShell's unwrap, and
+        # re-wrapping it here nests it, which is the same mistake spec 14.3 and
+        # the "suite never re-wraps a comma-returned array" test exist for.
+        $script:launchBypass = $false
+        $normal = Get-PermissionArgs
+        Assert-True ($normal -contains '--allow-dangerously-skip-permissions') `
+            'a normal launch must make bypass SELECTABLE from the mode cycle'
+
+        # ONE ELEMENT PER ARGV ENTRY. This is the assertion that was written
+        # with an -or in it, so '--permission-mode auto' as a single string
+        # satisfied it, shipped, and made claude exit with "unknown option" on
+        # every resume. A test that accepts both the right and the wrong shape
+        # is not a test. No element may contain a space.
+        Assert-True ($normal -contains '--permission-mode') `
+            'the flag must be its own element'
+        Assert-True ($normal -contains 'auto') `
+            'and its value must be a separate element, or it arrives as one unknown option'
+        foreach ($a in $normal) {
+            Assert-True ($a -notmatch '\s') `
+                "no permission argument may contain a space; splatting passes one element as one argv entry, and '$a' would arrive as a single option"
+        }
+
+        $script:launchBypass = $true
+        $danger = Get-PermissionArgs
+        Assert-True (($danger -join ' ') -match '(?<!allow-)--dangerously-skip-permissions') `
+            'dangerous mode must turn bypass ON, not merely offer it'
+        Assert-True (($danger -join ' ') -notmatch 'permission-mode') `
+            'auto must be ABSENT from the command line, not overridden: the operator asked for it stripped out'
+        Assert-True (($danger -join ' ') -notmatch 'allow-dangerously') `
+            'the selectable-bypass flag is pointless once bypass is on and must not be passed too'
+        $script:launchBypass = $false
+    }
+
 Test-Case -Name 'Test-CleanExitTail recognises a trailing /exit' `
     -Uses @('Test-CleanExitTail') `
     -Sabotage 'narrow the tail pattern so the /exit command block no longer matches' `
@@ -939,6 +982,158 @@ $($Case.Assertions)
     Remove-Item $sb.Root -Recurse -Force -ErrorAction SilentlyContinue
     return $rc
 }
+
+Integration-Case -Name 'D at the session list toggles dangerous mode and creates nothing' `
+    -Sabotage 'stop the D branch from matching, so the input falls through to the branch that offers to create a new project named D, which is what the operator actually got' `
+    -Mutate @{ Find = "'^-{0,2}[dD]\w*\.?\s*(\d*)`$'"; Replace = "'^ZZZNEVERMATCHES`$'" } `
+    -Assertions @'
+    # Drives the REAL list loop. The first version of this feature was reasoned
+    # about rather than driven, and D fell through to the new-project path.
+    $script:answers = @('d', 'q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; return $v }
+
+    $out = (claudecm 6>&1 | Out-String)
+    Assert-Contains $out 'Dangerous mode ON' 'pressing D must arm dangerous mode'
+    Assert-NotContains $out 'Create a NEW project' 'D must never be read as a project name'
+'@
+
+Integration-Case -Name 'claudecm d then a pick launches with bypass and no auto on the command line' `
+    -Sabotage 'return the normal flags from Get-PermissionArgs even when dangerous mode is armed, so the launch silently keeps the classifier' `
+    -Mutate @{ Find = "if (`$script:launchBypass) { return ,@('--dangerously-skip-permissions') }"
+               Replace = "if (`$false) { return ,@('--dangerously-skip-permissions') }" } `
+    -Assertions @'
+    # THE test. Everything else checks a helper in isolation or a menu toggle.
+    # This records what actually reached the binary, which is the only thing
+    # that decides whether the classifier runs. Two launches shipped with the
+    # wrong flags on 2026-09-14 because nothing asserted on the real argv.
+    $bin = Join-Path $env:USERPROFILE '.local\bin'
+    $pk  = Join-Path $env:USERPROFILE '.claude\projects\C--tmp-p1'
+    New-Item -ItemType Directory -Force $bin, $pk, 'C:\tmp\p1' | Out-Null
+    $env:CLAUDECM_STUB_ARGV    = Join-Path $env:USERPROFILE 'argv.txt'
+    $env:CLAUDECM_STUB_PROJDIR = $pk
+    # One argument per line via foreach. -join on $args here yielded the string
+    # character by character, which made an earlier version of this test fail
+    # on its own recorder rather than on the product.
+    Set-Content (Join-Path $bin 'claude.exe.ps1') @(
+        'if ($env:CLAUDECM_STUB_ARGV) { foreach ($a in $args) { Add-Content -LiteralPath $env:CLAUDECM_STUB_ARGV -Value ([string]$a) } }',
+        'if ($env:CLAUDECM_STUB_PROJDIR) { Set-Content -LiteralPath (Join-Path $env:CLAUDECM_STUB_PROJDIR "aaa.jsonl") -Value "{}" }',
+        'exit 0'
+    ) -Encoding UTF8
+    'aaa|C:\tmp\p1|One|1' | Set-Content (Join-Path $env:USERPROFILE '.claudecm\sessions.txt') -Encoding UTF8
+    '{}' | Set-Content (Join-Path $pk 'aaa.jsonl') -Encoding UTF8
+
+    $script:answers = @('1', 'q', 'q', 'q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; if ($null -eq $v) { 'q' } else { $v } }
+
+    claudecm d 6>&1 | Out-Null
+
+    $recorded = ''
+    if (Test-Path $env:CLAUDECM_STUB_ARGV) { $recorded = (Get-Content $env:CLAUDECM_STUB_ARGV -Raw) }
+    Assert-Contains $recorded 'dangerously-skip-permissions' `
+        'claudecm d then a pick must launch with bypass ON'
+    Assert-NotContains $recorded 'permission-mode' `
+        'auto must not be on the command line at all, not even overridden'
+    Assert-NotContains $recorded 'allow-dangerously' `
+        'the selectable-bypass flag is pointless once bypass is on'
+'@
+
+Integration-Case -Name 'T at the session list toggles talk mode and creates nothing' `
+    -Sabotage 'stop the T branch from matching, so the input falls through to the branch that offers to create a new project named T' `
+    -Mutate @{ Find = "'^-{0,2}[tT]\w*\.?\s*(\d*)`$'"; Replace = "'^ZZZNEVERMATCHEST`$'" } `
+    -Assertions @'
+    $script:answers = @('t', 'q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; return $v }
+
+    $out = (claudecm 6>&1 | Out-String)
+    Assert-Contains $out 'Talk mode ON' 'pressing T must arm talk mode'
+    Assert-NotContains $out 'Create a NEW project' 'T must never be read as a project name'
+'@
+
+Integration-Case -Name 'D and T cannot both be armed, the later choice wins' `
+    -Sabotage 'let talk mode stay armed when dangerous mode is turned on, so Get-PermissionArgs silently returns plan flags for a session the operator asked to be unrestricted' `
+    -Mutate @{ Find = 'if ($script:launchBypass) { $script:launchPlan = $false }'
+               Replace = 'if ($false) { $script:launchPlan = $false }' } `
+    -Assertions @'
+    # Order matters and both directions are checked, because the two flags are
+    # read by one function and a stale one silently wins.
+    $script:answers = @('t', 'd', 'q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; return $v }
+    $out = (claudecm 6>&1 | Out-String)
+    Assert-Contains $out 'Talk mode ON' 'T must arm talk mode first'
+    Assert-Contains $out 'Dangerous mode ON' 'D after T must arm dangerous mode'
+    # The list banner re-renders every loop, so the whole captured output still
+    # holds the earlier "TALK MODE IS ON" from when T was armed. Only the
+    # render AFTER dangerous mode was armed says anything about the end state.
+    $tail = $out.Substring($out.LastIndexOf('Dangerous mode ON'))
+    Assert-NotContains $tail 'TALK MODE IS ON' `
+        'talk mode must be cleared once dangerous mode is armed'
+'@
+
+Integration-Case -Name 'claudecm t then a pick launches in plan mode and nothing else' `
+    -Sabotage 'ignore the talk-mode flag in Get-PermissionArgs, so T prints a banner and launches in auto anyway, which is how D shipped broken' `
+    -Mutate @{ Find = "if (`$script:launchPlan)   { return ,@('--permission-mode', 'plan') }"
+               Replace = "if (`$false)   { return ,@('--permission-mode', 'plan') }" } `
+    -Assertions @'
+    # Asserts on the recorded argv, not on the helper. Same reason as the D
+    # case: two launches shipped with the wrong flags because nothing checked
+    # what actually reached the binary.
+    $bin = Join-Path $env:USERPROFILE '.local\bin'
+    $pk  = Join-Path $env:USERPROFILE '.claude\projects\C--tmp-p1'
+    New-Item -ItemType Directory -Force $bin, $pk, 'C:\tmp\p1' | Out-Null
+    $env:CLAUDECM_STUB_ARGV    = Join-Path $env:USERPROFILE 'argv.txt'
+    $env:CLAUDECM_STUB_PROJDIR = $pk
+    Set-Content (Join-Path $bin 'claude.exe.ps1') @(
+        'if ($env:CLAUDECM_STUB_ARGV) { foreach ($a in $args) { Add-Content -LiteralPath $env:CLAUDECM_STUB_ARGV -Value ([string]$a) } }',
+        'if ($env:CLAUDECM_STUB_PROJDIR) { Set-Content -LiteralPath (Join-Path $env:CLAUDECM_STUB_PROJDIR "aaa.jsonl") -Value "{}" }',
+        'exit 0'
+    ) -Encoding UTF8
+    'aaa|C:\tmp\p1|One|1' | Set-Content (Join-Path $env:USERPROFILE '.claudecm\sessions.txt') -Encoding UTF8
+    '{}' | Set-Content (Join-Path $pk 'aaa.jsonl') -Encoding UTF8
+
+    $script:answers = @('1', 'q', 'q', 'q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; if ($null -eq $v) { 'q' } else { $v } }
+
+    claudecm t 6>&1 | Out-Null
+
+    $recorded = ''
+    if (Test-Path $env:CLAUDECM_STUB_ARGV) { $recorded = (Get-Content $env:CLAUDECM_STUB_ARGV -Raw) }
+    Assert-Contains $recorded 'plan' 'claudecm t then a pick must launch in plan mode'
+    Assert-NotContains $recorded 'dangerously' `
+        'talk mode must not carry any bypass flag, selectable or otherwise'
+    Assert-NotContains $recorded 'auto' 'auto must not be on the command line in talk mode'
+'@
+
+Integration-Case -Name 'claudecm -D arms dangerous mode instead of reaching claude as --debug' `
+    -Sabotage 'make the toggle a no-op, so the verb is consumed but nothing is armed and the operator is told nothing' `
+    -Mutate @{ Find = '$script:launchBypass = -not $script:launchBypass'
+               Replace = '$script:launchBypass = $false' } `
+    -Assertions @'
+    function Read-Host { param([string]$Prompt) 'q' }
+    $out = (claudecm -D 6>&1 | Out-String)
+    Assert-Contains $out 'Dangerous mode ON' '-D must arm dangerous mode in claudecm'
+    # After the verb is consumed the dispatch continues as if it was not typed,
+    # so this lands in the session list rather than a pass-through launch.
+    # Asserting on the rendered list, NOT on the Read-Host prompt: a stubbed
+    # Read-Host never emits its prompt, so that assertion could only ever fail.
+    Assert-Contains $out '=== Saved Sessions ===' '-D must still reach the session list'
+'@
+
+Integration-Case -Name 'the session list footer shows whether dangerous mode is armed' `
+    -Sabotage 'render the footer without the dangerous-mode row, so the operator cannot tell whether the next launch skips every check' `
+    -Mutate @{ Find = 'Write-Host "  D. Dangerous mode off (press D to launch with all permission checks skipped)"'
+               Replace = 'Write-Host "  "' } `
+    -Assertions @'
+    $script:answers = @('q')
+    $script:ai = 0
+    function Read-Host { param([string]$Prompt) $v = $script:answers[$script:ai]; $script:ai++; return $v }
+    $out = (claudecm 6>&1 | Out-String)
+    Assert-Contains $out 'D. Dangerous mode off' 'the footer must advertise D and its current state'
+'@
 
 Integration-Case -Name 'claudecm -s filters the list by name, case-insensitively' `
     -Sabotage 'change the search predicate from .Contains to .StartsWith, so a term in the middle of a name stops matching' `

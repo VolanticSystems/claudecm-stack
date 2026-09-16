@@ -356,7 +356,7 @@ Walk `$args`:
    - `skip` → preNamed = null. Empty → preNamed = default. Otherwise → preNamed = input.
 6. **Fresh launch (any branch that fell through):**
    - Display name = `<machine> - <preNamed or match.Desc or cwd leaf>`
-   - Build args: `--dangerously-skip-permissions -n <displayName> [<passArgs>...]`
+   - Build args: `--allow-dangerously-skip-permissions --permission-mode auto -n <displayName> [<passArgs>...]`
    - Launch via the platform's launch path (Section 11.6).
    - On non-zero exit, restore directory and return.
    - **If preNamed was set and SessionId resolved:** register new entry at top of sessions.txt with empty tokens; run Do-PostExit with that SessionId.
@@ -386,8 +386,25 @@ The two implementations launch `claude` differently. Same observable behavior, d
 Each call site uses one of two helpers (Section 11.6.1 for resumes, Section 11.6.2 for fresh launches). Both helpers ultimately call `claude` with direct positional arguments:
 
 ```
-& $claudeExe --dangerously-skip-permissions [--resume <guid>] -n $displayName [@passArgs]
+& $claudeExe --allow-dangerously-skip-permissions --permission-mode auto [--resume <guid>] -n $displayName [@passArgs]
 ```
+
+**Two flags that share a substring, and they do opposite things.**
+`--dangerously-skip-permissions` turns bypass ON and is reserved for the two
+headless `-p` sites, where nobody is present to answer a prompt.
+`--allow-dangerously-skip-permissions` turns nothing on: it makes bypass
+*selectable* from the in-session mode cycle, which it otherwise is not. Every
+interactive session still starts in `auto`. Added 2026-09-14 because the
+auto-mode classifier refuses non-edit actions mid-session and the refusal is
+sticky for the rest of the conversation, so without this the only escape is to
+kill the session and relaunch, losing whatever was in flight.
+`Test-LaunchMode.ps1` counts invocations rather than mentions and uses a
+negative lookbehind to keep the two apart.
+
+**Bash has NOT been changed and still launches interactive sessions with bypass
+ON** (three call sites). The 2026-09-11 move to `auto` was PowerShell-only.
+This is a real divergence from this section, recorded here rather than papered
+over; it is not a Linux bug so much as a decision nobody has made yet.
 
 No splatting of an array variable. PowerShell 5.1's native-command argument passing is unreliable when an array containing strings with spaces is splatted via `@var` — Windows process creation flattens argv into a single command-line string and the receiving process re-splits it. Display names like `desktop - My Project` get mangled, with the bare `-` between "desktop" and "My" interpreted by Claude as `--print` mode entry. Direct positional `& $claudeExe ...` lays each argument out inline and PowerShell quotes them correctly.
 

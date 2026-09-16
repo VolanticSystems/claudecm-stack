@@ -40,6 +40,25 @@
 #                           one passed as an argument, which matters because
 #                           Windows caps a command line near 32K.
 
+#   CLAUDECM_STUB_ARGV      a file path. The stub appends the argument list it
+#                           was invoked with, one launch per line. This is how
+#                           a test proves which permission flags actually
+#                           reached the binary, rather than proving that a
+#                           helper function returns the right array in
+#                           isolation. That gap is how a launch shipped with
+#                           the wrong flags twice on 2026-09-14.
+if ($env:CLAUDECM_STUB_ARGV) {
+    try {
+        # One argument per line, via foreach. Joining loses the boundary, which
+        # is the very thing under test when a flag and its value must stay
+        # separate, and -join over $args here yielded one character per element.
+        foreach ($a in $args) {
+            Add-Content -LiteralPath $env:CLAUDECM_STUB_ARGV -Value ([string]$a) -Encoding UTF8
+        }
+        Add-Content -LiteralPath $env:CLAUDECM_STUB_ARGV -Value '--- end of launch ---' -Encoding UTF8
+    } catch { }
+}
+
 # Headless mode first: it returns, so nothing below it can run.
 if ($env:CLAUDECM_STUB_PJSON -or $env:CLAUDECM_STUB_PEMPTY) {
     # Drain stdin. The caller pipes the meta-prompt in, and leaving it unread
