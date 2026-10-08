@@ -1320,6 +1320,11 @@ IMPORTANT:
                     '-Desc', "`"$rawDesc`"", '-SessionsFile', "`"$sessionsFile`"")
                 $beforeArg = ($before.Keys -join ',')
                 if ($beforeArg) { $spArgs += @('-BeforeGuids', "`"$beforeArg`"") }
+                # Watch THIS shell's claude session until it ends, not a fixed
+                # five minutes. The conversation file only appears when the first
+                # message is sent; a slow opening prompt used to outlast the old
+                # window and the session was never registered. See the helper.
+                $spArgs += @('-WatchPid', "$PID")
                 # pwsh, NEVER powershell.exe. Spawning powershell.exe flips the
                 # console to a raster font and resizes the window: an unfixed
                 # conhost defect (microsoft/terminal#367), measured on this
