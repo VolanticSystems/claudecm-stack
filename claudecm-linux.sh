@@ -136,6 +136,60 @@ process.stdout.write(String(s.cleanupPeriodDays));}catch(e){process.stdout.write
 }
 
 # ==================================================================
+# Bootstrap: idle compaction off
+# ==================================================================
+# Claude Code 2.1.286 (September 2026) started compacting any session that sits
+# idle for about 55 minutes with 200K+ tokens of context, shortly before its
+# one-hour prompt cache expires, so the summary can be written at the cached
+# rate. It arrived behind a server-side switch with no release note and no
+# setting; the opt-out came in 2.1.290 and is still absent from the settings
+# reference. ClaudeCM exists so that a conversation is never thrown away
+# without the user deciding so, hence the opt-out is asserted on every launch.
+# The context-limit compaction (autoCompactEnabled) is deliberately left on: it
+# fires at the real ceiling and is the only thing between a long session and a
+# "Prompt is too long" stall.
+__cm_ensure_idle_compaction_off() {
+    local settings="$HOME/.claude/settings.json"
+    [[ -f "$settings" ]] || return 0
+    local node; node=$(__cm_resolve_node) || return 0
+
+    # Three answers, as in __cm_ensure_cleanup_period_days: OFF (already an
+    # explicit false, nothing to do), ON (any other value, or the key absent,
+    # which is Claude Code's default), ERR (could not read the file: change
+    # nothing and claim nothing).
+    local current
+    current=$("$node" -e "
+try{const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
+process.stdout.write(s.idleCompaction===false?'OFF':'ON');}
+catch(e){process.stdout.write('ERR');}" "$settings" 2>/dev/null)
+    [[ "$current" == "ON" ]] || return 0
+
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "$__cm_backup_dir" 2>/dev/null
+    cp -f "$settings" "$__cm_backup_dir/settings.json.$ts.pre-idle-compaction" 2>/dev/null
+
+    "$node" -e "
+try{const fs=require('fs');const s=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+s.idleCompaction=false;fs.writeFileSync(process.argv[1],JSON.stringify(s,null,2));}catch(e){}
+" "$settings" 2>/dev/null
+
+    # Read it back off DISK before saying anything. The line below is the only
+    # thing the user sees about this, so it has to be evidence that the write
+    # landed, not the intention to write.
+    local after
+    after=$("$node" -e "
+try{const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
+process.stdout.write(s.idleCompaction===false?'OFF':'ON');}catch(e){process.stdout.write('ERR');}" "$settings" 2>/dev/null)
+
+    if [[ "$after" == "OFF" ]]; then
+        __cm_say_c "$__CM_C_CYAN" "Turned off Claude Code's idle auto-compaction (idleCompaction: false)."
+    else
+        __cm_say_c "$__CM_C_YELLOW" "[warning] Could not set idleCompaction to false in settings.json."
+        __cm_say "Sessions over 200K tokens left idle for about 55 minutes will still be compacted."
+    fi
+}
+
+# ==================================================================
 # Lock, atomic write, sessions.txt I/O
 # ==================================================================
 __cm_acquire_lock() {
@@ -1614,6 +1668,7 @@ claudecm() {
     mkdir -p "$__cm_cm_dir" "$__cm_backup_dir" 2>/dev/null
     [[ -f "$__cm_sessions_file" ]] || : > "$__cm_sessions_file"
     __cm_ensure_cleanup_period_days
+    __cm_ensure_idle_compaction_off
     __cm_auto_backup_sessions
     # Machine name.
     if [[ ! -f "$__cm_machine_name_file" ]]; then

@@ -321,8 +321,8 @@ Useful switches: `-Only <substring>` / `ONLY=<substring>` to run one test,
 
 Current, as of 2026-08-27:
 
-    PowerShell   62 tests   62 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
-    bash         40 tests   40 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    PowerShell   77 tests   77 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
+    bash         45 tests   45 pass, 0 fail, 0 error, 0 hollow, 0 stale, 0 inconclusive
 
 Coverage is 32 of 32 PowerShell functions and 26 of 42 on bash, measured by
 asking which functions a test names rather than by estimating. Read the

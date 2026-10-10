@@ -56,7 +56,7 @@ All ClaudeCM state lives under `~/.claudecm/`:
 ClaudeCM also reads (and selectively writes) Claude Code's own state:
 
 ```
-~/.claude/settings.json                     # Read on startup; cleanupPeriodDays may be set
+~/.claude/settings.json                     # Read on startup; cleanupPeriodDays and idleCompaction may be set
 ~/.claude/sessions/<pid>.json               # Per-running-process session manifest. Read-only for ClaudeCM.
 ~/.claude/projects/<project-key>/           # Per-project Claude Code state
   <GUID>.jsonl                              # Conversation transcript (Claude owns)
@@ -102,7 +102,14 @@ function you were reading. Corrected 2026-08-26 to `$backupDir` plus
    - Write the file back, pretty-printed JSON.
    - Print a single cyan-colored line: `  Protected session transcripts from Claude Code's 30-day auto-delete.`
    - Failures must be silent. Never block ClaudeCM on settings issues.
-5. **Machine name bootstrap.** If `~/.claudecm/machine-name.txt` does not exist:
+5. **Ensure idle compaction is off.** Read `~/.claude/settings.json`. If file or parse fails, skip silently. If `idleCompaction` is anything other than the boolean `false` (including absent, which is Claude Code's default, on):
+   - Back up settings.json to `~/.claudecm/backup/settings.json.<yyyyMMdd-HHmmss>.pre-idle-compaction`.
+   - Set `idleCompaction` to `false`. Leave `autoCompactEnabled` alone: the context-limit compaction is the safety net against a "Prompt is too long" stall and stays on.
+   - Write the file back, pretty-printed JSON.
+   - Read the value back off disk. Only if it is `false`, print a single cyan-colored line: `  Turned off Claude Code's idle auto-compaction (idleCompaction: false).` Otherwise print a yellow warning that it could not be set, and a plain line saying idle sessions over 200K tokens will still be compacted.
+   - Already `false`: write nothing, print nothing.
+   - Why: since Claude Code 2.1.286 a session idle for about 55 minutes with 200K+ tokens of context is compacted in the background, before its one-hour prompt cache expires. The opt-out key exists from 2.1.290 (unknown keys are ignored by older versions).
+6. **Machine name bootstrap.** If `~/.claudecm/machine-name.txt` does not exist:
    - Print blank line.
    - Prompt: `  Machine name for remote display (e.g. desktop, laptop): `
    - If empty, fall back to the machine's hostname (lowercased).
@@ -814,7 +821,7 @@ ClaudeCM must remain usable even when its dependencies are partially broken:
 
 - `cmv` missing → snapshot, trim, refresh, and token backfill skip with a single notice. Other operations continue.
 - `node` missing → skeleton extraction during refresh skips with a notice. Sync-SessionIndex on bash skips silently.
-- `~/.claude/settings.json` missing or unparseable → cleanupPeriodDays bootstrap skips silently.
+- `~/.claude/settings.json` missing or unparseable → cleanupPeriodDays and idleCompaction bootstraps skip silently.
 - `~/.claude/projects/<key>/` missing → orphan scan returns empty; sync_session_index returns; get_session_info returns missing status.
 - Recovery prompt generation failure → falls back to cancel.
 - Sync-SessionIndex failure → silent. Never blocks anything.

@@ -51,8 +51,15 @@ instead of a working copy, and I did not, because everything I ran passed.
     git pull
     bash tests/run-tests.sh
 
-Expected: `40 test(s): 40 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
+Expected: `45 test(s): 45 pass, 0 fail, 0 error, 0 hollow, 0 stale-sabotage, 0
 inconclusive`, and exit 0. Should take a few seconds.
+
+Three of those (`ensure_idle_compaction_off ...`, added 2026-10-10) cover the
+new bootstrap step that writes `idleCompaction: false` into
+`~/.claude/settings.json`, the opt-out for the idle compaction Claude Code
+2.1.286 introduced. They need `node`, like the cleanup tests, and have only
+been run under Git Bash on Windows so far. On this box the step will fire once
+on the first `claudecm` launch after deploy and print one cyan line.
 
 **If it takes minutes, you have no `flock`.** Git Bash ships none, and
 `__cm_acquire_lock` responds by spinning its full 50 x 0.2s retry and timing out

@@ -135,6 +135,18 @@ means something has since lowered or broken
 `%USERPROFILE%\.claude\settings.json`. Check that file before reverting anything,
 because the old code would have hidden the problem rather than fixed it.
 
+**A message about `idleCompaction` or "Turned off Claude Code's idle auto-compaction".**
+Added 2026-10-10, as a sibling of the function above. Claude Code 2.1.286 began
+compacting idle sessions (200K+ tokens, about 55 minutes after the last turn,
+just before the one-hour prompt cache expires) and 2.1.290 added the opt-out
+key; the bootstrap writes `idleCompaction: false` into `settings.json` once and
+says nothing on later launches. To undo: delete the `idleCompaction` key from
+`%USERPROFILE%\.claude\settings.json` (or restore the
+`~/.claudecm/backup/settings.json.<stamp>.pre-idle-compaction` copy) and remove
+`Ensure-IdleCompactionOff` from the script, or the next launch writes it again.
+If it has started printing its warning, the write to `settings.json` is failing
+and the file needs looking at before anything is reverted.
+
 ---
 
 ## What was NOT touched

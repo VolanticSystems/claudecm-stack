@@ -1050,6 +1050,78 @@ test_case "ensure_cleanup_period_days never claims protection it did not apply" 
     "announce unconditionally instead of checking what actually landed on disk, the bug this test was written for" \
     's@(( after >= 1000 )); then@true; then@' t_cleanup_does_not_claim_what_it_did_not_do
 
+t_idle_compaction_off_writes_and_announces() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "           node is required here; skipping would leave this unguarded" >&2
+        return 90
+    fi
+    mkdir -p "$HOME/.claude"
+    # The key absent is the real starting state: Claude Code's default is on.
+    printf '{"cleanupPeriodDays":100000,"theme":"dark"}\n' > "$HOME/.claude/settings.json"
+
+    local out; out=$(__cm_ensure_idle_compaction_off 2>&1)
+
+    local val; val=$(node -e "const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(s.idleCompaction===false?'OFF':String(s.idleCompaction))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_eq "OFF" "$val" "idleCompaction must be exactly false after the bootstrap" || return 90
+    local theme; theme=$(node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).theme))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_eq "dark" "$theme" "rewriting settings.json must preserve every other key" || return 90
+    local n; n=$(ls -1 "$__cm_backup_dir"/settings.json.* 2>/dev/null | wc -l | tr -d ' ')
+    assert_true "$([[ "$n" -ge 1 ]] && echo 0 || echo 1)" \
+        "settings.json must be backed up before it is rewritten" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'idle auto-compaction' && echo 0 || echo 1)" \
+        "and having turned it off, it should say so"
+}
+
+t_idle_compaction_off_does_not_claim_what_it_did_not_do() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "           node is required here; skipping would leave this unguarded" >&2
+        return 90
+    fi
+    mkdir -p "$HOME/.claude"
+    printf '{"theme":"dark"}\n' > "$HOME/.claude/settings.json"
+
+    chmod 444 "$HOME/.claude/settings.json"
+    local out; out=$(__cm_ensure_idle_compaction_off 2>&1)
+    chmod 644 "$HOME/.claude/settings.json"
+
+    local val; val=$(node -e "const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(s.idleCompaction===undefined?'ABSENT':String(s.idleCompaction))" "$HOME/.claude/settings.json" 2>/dev/null)
+    assert_eq "ABSENT" "$val" "precondition: the write must genuinely have failed for this test to mean anything" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Turned off' && echo 1 || echo 0)" \
+        "it must not report success for a write that did not land" || return 90
+    assert_true "$(printf '%s' "$out" | grep -q 'Could not set idleCompaction' && echo 0 || echo 1)" \
+        "and a failure the user cannot see is not much better than a false success"
+}
+
+t_idle_compaction_off_leaves_already_off_untouched() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "           node is required here; skipping would leave this unguarded" >&2
+        return 90
+    fi
+    mkdir -p "$HOME/.claude"
+    printf '{"idleCompaction":false,"theme":"dark"}\n' > "$HOME/.claude/settings.json"
+
+    local out; out=$(__cm_ensure_idle_compaction_off 2>&1)
+
+    local body; body=$(cat "$HOME/.claude/settings.json")
+    assert_eq '{"idleCompaction":false,"theme":"dark"}' "$body" \
+        "nothing to do means nothing is rewritten, not even a reformat" || return 90
+    local n; n=$(ls -1 "$__cm_backup_dir"/settings.json.* 2>/dev/null | wc -l | tr -d ' ')
+    assert_eq "0" "$n" "and nothing is backed up, because nothing was going to be rewritten" || return 90
+    assert_eq "" "$out" "and it says nothing: a line on every launch about a thing already done is noise"
+}
+
+test_case "ensure_idle_compaction_off writes false, keeps the rest, backs up and says so" \
+    "write true instead of false, which leaves idle compaction exactly as it was" \
+    's@s.idleCompaction=false;@s.idleCompaction=true;@' t_idle_compaction_off_writes_and_announces
+
+test_case "ensure_idle_compaction_off never claims what it did not apply" \
+    "announce unconditionally instead of checking what actually landed on disk" \
+    's@\[\[ "$after" == "OFF" \]\]; then@true; then@' t_idle_compaction_off_does_not_claim_what_it_did_not_do
+
+test_case "ensure_idle_compaction_off leaves an already-off settings.json untouched" \
+    "drop the already-off check, so every launch rewrites, backs up and announces" \
+    's@\[\[ "$current" == "ON" \]\] || return 0@true@' t_idle_compaction_off_leaves_already_off_untouched
+
 test_case "search mode accepts s, S, -s and -S" \
     "drop the bare-letter arms, leaving only the dashed forms, which is the shipped bug" \
     's@"\$first" == "s" || "\$first" == "S" || @@' t_search_accepts_all_four_forms

@@ -75,6 +75,56 @@
     }
     Ensure-CleanupPeriodDays
 
+    function Ensure-IdleCompactionOff {
+        # Claude Code 2.1.286 (September 2026) started compacting any session
+        # that sits idle for about 55 minutes with 200K+ tokens of context,
+        # shortly before its one-hour prompt cache expires, so the summary can
+        # be written at the cached rate. It arrived behind a server-side switch
+        # with no release note and no setting; the opt-out came in 2.1.290 and
+        # is still absent from the settings reference. ClaudeCM exists so that
+        # a conversation is never thrown away without the user deciding so,
+        # hence the opt-out is asserted on every launch. The context-limit
+        # compaction (autoCompactEnabled) is deliberately left on: it fires at
+        # the real ceiling and is the only thing between a long session and a
+        # "Prompt is too long" stall.
+        $settingsPath = "$env:USERPROFILE\.claude\settings.json"
+        if (-not (Test-Path $settingsPath)) { return }
+
+        # Read first, on its own, same reasoning as Ensure-CleanupPeriodDays: a
+        # file we cannot parse is left exactly as it is, and nothing is said.
+        $settings = $null
+        try { $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json } catch { return }
+        if ($null -eq $settings) { return }
+
+        # Only an explicit false counts as off. The key being absent means
+        # Claude Code's default, which is on.
+        $current = $settings.idleCompaction
+        if ($current -is [bool] -and $current -eq $false) { return }
+
+        $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $backupDir = "$env:USERPROFILE\.claudecm\backup"
+        if (-not (Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory -Force | Out-Null }
+        Copy-Item $settingsPath "$backupDir\settings.json.$ts.pre-idle-compaction" -ErrorAction SilentlyContinue
+
+        try {
+            $settings | Add-Member -NotePropertyName 'idleCompaction' -NotePropertyValue $false -Force
+            $settings | ConvertTo-Json -Depth 20 | Set-Content $settingsPath -Encoding UTF8 -ErrorAction Stop
+        } catch { }
+
+        # Read it back off DISK before saying anything. The line below is the
+        # only thing the user sees about this, so it has to be evidence that the
+        # write landed, not the intention to write.
+        $after = $null
+        try { $after = (Get-Content $settingsPath -Raw | ConvertFrom-Json).idleCompaction } catch { }
+        if ($after -is [bool] -and $after -eq $false) {
+            Write-Host "  Turned off Claude Code's idle auto-compaction (idleCompaction: false)." -ForegroundColor Cyan
+        } else {
+            Write-Host "  Warning: could not set idleCompaction to false in settings.json." -ForegroundColor Yellow
+            Write-Host "  Sessions over 200K tokens left idle for about 55 minutes will still be compacted."
+        }
+    }
+    Ensure-IdleCompactionOff
+
     if (-not (Test-Path $cmDir)) { New-Item -ItemType Directory -Path $cmDir | Out-Null }
     if (-not (Test-Path $sessionsFile)) { New-Item -ItemType File -Path $sessionsFile | Out-Null }
 

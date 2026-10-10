@@ -1272,6 +1272,106 @@ Test-Case -Name 'Ensure-CleanupPeriodDays leaves an unreadable settings.json alo
             'above all it must not claim protection for a file it could not read'
     }
 
+# -----------------------------------------------------------------------------
+# Ensure-IdleCompactionOff. Same three-way discipline as its sibling above, for
+# the same reason: the only visible output is a line claiming the thing is off,
+# and if that line can print without the write having landed, the user leaves a
+# 400K-token session for an hour and comes back to a summary.
+# -----------------------------------------------------------------------------
+
+Test-Case -Name 'Ensure-IdleCompactionOff writes false, keeps every other key, backs up first, and says so' `
+    -Uses @('Ensure-IdleCompactionOff') `
+    -Sabotage 'write true instead of false, which is the one value that leaves idle compaction exactly as it was' `
+    -Mutate @{ 'Ensure-IdleCompactionOff' = @{
+        Find    = "`$settings | Add-Member -NotePropertyName 'idleCompaction' -NotePropertyValue `$false -Force"
+        Replace = "`$settings | Add-Member -NotePropertyName 'idleCompaction' -NotePropertyValue `$true -Force" } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        # The key absent is the real starting state on every machine that has
+        # not opted out: Claude Code's default is on.
+        Set-Content $settingsPath '{"cleanupPeriodDays":100000,"theme":"dark"}' -Encoding UTF8
+
+        $out = (Ensure-IdleCompactionOff 6>&1 | Out-String)
+
+        $after = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ($after.idleCompaction -is [bool] -and $after.idleCompaction -eq $false) `
+            "idleCompaction must be exactly false; found [$($after.idleCompaction)]"
+        Assert-Equal 'dark' $after.theme `
+            'rewriting settings.json must preserve every other key, or ClaudeCM eats the user config'
+        Assert-Equal 100000 $after.cleanupPeriodDays `
+            'including the retention its sibling wrote'
+        $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
+        Assert-True ($backups.Count -ge 1) 'settings.json must be backed up before it is rewritten'
+        Assert-True ($out -match 'idle auto-compaction') `
+            'and having turned it off, it should say so'
+    }
+
+Test-Case -Name 'Ensure-IdleCompactionOff does NOT claim what it failed to apply' `
+    -Uses @('Ensure-IdleCompactionOff') `
+    -Sabotage 'announce unconditionally instead of checking what actually landed on disk' `
+    -Mutate @{ 'Ensure-IdleCompactionOff' = @{
+        Find = 'if ($after -is [bool] -and $after -eq $false) {'; Replace = 'if ($true) {' } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        Set-Content $settingsPath '{"theme":"dark"}' -Encoding UTF8
+        Set-ItemProperty $settingsPath -Name IsReadOnly -Value $true
+        try   { $out = (Ensure-IdleCompactionOff 6>&1 | Out-String) }
+        finally { Set-ItemProperty $settingsPath -Name IsReadOnly -Value $false }
+
+        $after = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ($null -eq $after.idleCompaction) `
+            'precondition: the write must genuinely have failed for this test to mean anything'
+        Assert-True ($out -notmatch 'Turned off') `
+            'it must not report success for a write that did not land; the user would leave a long session idle believing it safe'
+        Assert-True ($out -match 'could not set idleCompaction') `
+            'and a failure the user cannot see is not much better than a false success'
+    }
+
+Test-Case -Name 'Ensure-IdleCompactionOff leaves a settings.json that already says false untouched' `
+    -Uses @('Ensure-IdleCompactionOff') `
+    -Sabotage 'drop the already-off check, so every launch rewrites, backs up and announces' `
+    -Mutate @{ 'Ensure-IdleCompactionOff' = @{
+        Find = 'if ($current -is [bool] -and $current -eq $false) { return }'; Replace = 'if ($false) { return }' } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        $body = '{"idleCompaction":false,"theme":"dark"}'
+        Set-Content $settingsPath $body -Encoding UTF8
+
+        $out = (Ensure-IdleCompactionOff 6>&1 | Out-String)
+
+        Assert-Equal $body (Get-Content $settingsPath -Raw).TrimEnd() `
+            'nothing to do means nothing is rewritten, not even a reformat'
+        $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
+        Assert-Equal 0 $backups.Count `
+            'and nothing is backed up, because nothing was going to be rewritten'
+        Assert-True ([string]::IsNullOrWhiteSpace($out)) `
+            'and it says nothing: a line on every launch about a thing already done is noise'
+    }
+
+Test-Case -Name 'Ensure-IdleCompactionOff leaves an unreadable settings.json alone' `
+    -Uses @('Ensure-IdleCompactionOff') `
+    -Sabotage 'treat a failed read as an empty settings object, so a file that could not be parsed is backed up and rewritten anyway' `
+    -Mutate @{ 'Ensure-IdleCompactionOff' = @{
+        Find = 'catch { return }'; Replace = 'catch { $settings = [pscustomobject]@{} }' } } `
+    -Body {
+        $settingsPath = Join-Path $sandbox.Root '.claude\settings.json'
+        New-Item -ItemType Directory -Path (Split-Path $settingsPath) -Force | Out-Null
+        Set-Content $settingsPath '{not valid json at all' -Encoding UTF8
+
+        $out = (Ensure-IdleCompactionOff 6>&1 | Out-String)
+
+        Assert-True ((Get-Content $settingsPath -Raw) -match 'not valid json at all') `
+            'a file that could not be parsed must be left exactly as it was'
+        $backups = @(Get-ChildItem (Join-Path $sandbox.Root '.claudecm\backup') -Filter 'settings.json.*' -ErrorAction SilentlyContinue)
+        Assert-Equal 0 $backups.Count `
+            'and nothing should have been backed up, because nothing was going to be rewritten'
+        Assert-True ($out -notmatch 'Turned off') `
+            'above all it must not claim anything about a file it could not read'
+    }
+
 Test-Case -Name 'Save-ArchivedSessions writes the [archived] marker' `
     -Uses @('Parse-SessionLine','Get-Sessions','Get-ArchivedSessions','Acquire-SessionsLock',
             'Release-SessionsLock','Write-SessionsAtomic','Save-ArchivedSessions') `
